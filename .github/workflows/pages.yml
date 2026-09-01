@@ -22,7 +22,11 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  # Never cancel: this deploys production. Cancelling mid-`deploy-pages` can
+  # leave a deployment stuck pending and block every later one, turning a
+  # harmless overlap into a wedged Pages state that needs clearing by hand.
+  # Queueing instead costs one redundant build and always ends on newest main.
+  cancel-in-progress: false
 
 jobs:
   deploy:

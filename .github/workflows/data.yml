@@ -31,6 +31,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Explicit because this job pushes. checkout@v4 defaults this to true,
+          # but v5 flipped the default to false — on a major bump the rebuild
+          # would still compute correct data, still go green, and silently fail
+          # to deliver it, looking like a token permissions problem rather than
+          # an action default change.
+          persist-credentials: true
 
       - uses: actions/setup-node@v4
         with:
