@@ -1,13 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parseHours } from "../src/lib/hours";
-import {
-  type CityCandidates,
-  type DistrictCensus,
-  parseCityCandidates,
-  recordDistrictReading,
-  resolveDistrict,
-} from "../src/lib/location";
+import { UNKNOWN_DISTRICT, parseLocation } from "../src/lib/location";
 import type { DataIndex, DistrictEntry, Venue, VenueKind } from "../src/lib/types";
 import {
   DATASETS,
@@ -29,17 +23,29 @@ import {
  * 0.000% for both. The floors sit ~9% and ~8% below those kept counts: loose
  * enough to ride out normal churn, tight enough to catch an upstream format
  * change or a truncated response before it overwrites good data.
+ *
+ * `maxUnknown` is the odd one out: it counts venues that ended up in
+ * `UNKNOWN_DISTRICT`, which is the only way a district the frozen `DISTRICTS`
+ * table has never heard of can show itself. Measured 2026-09-01: 13 venues in
+ * 3 buckets (新竹市 11, 新竹縣 1, 臺中市 1), every one an address that names a 里
+ * instead of a 區 or misspells it. 50 is ~4x that, and the figure only moves
+ * when an address stops naming its district, so it rides out years of churn
+ * while still aborting on the systemic case. It cannot catch a new district of
+ * two or three venues — those land visibly in 其他 until the table is
+ * regenerated — but it does catch one big enough to matter.
  */
 export const GATES: Readonly<{
   minClinics: number;
   minPharmacies: number;
   maxHoursFailRate: number;
   maxLocationFailRate: number;
+  maxUnknown: number;
 }> = {
   minClinics: 20_000,
   minPharmacies: 7_000,
   maxHoursFailRate: 0.01,
   maxLocationFailRate: 0.02,
+  maxUnknown: 50,
 };
 
 export class GateFailure extends Error {
@@ -91,12 +97,7 @@ export function buildFromRecords(input: BuildInput): BuildResult {
   const shards = new Map<string, Venue[]>();
   const stats = {} as Record<VenueKind, BuildStats>;
   const bitmapById = new Map<string, string>();
-
-  // A district name cannot be read off one address (see `resolveDistrict`), so
-  // the first pass only votes on the readings it sees and the second pass files
-  // the venues once every vote is in.
-  const census: DistrictCensus = new Map();
-  const placed: { venue: Venue; where: CityCandidates }[] = [];
+  let unknownDistricts = 0;
 
   for (const [kind, rows] of [
     ["clinic", input.clinics],
@@ -125,11 +126,12 @@ export function buildFromRecords(input: BuildInput): BuildResult {
         continue;
       }
 
-      const where = parseCityCandidates(row.ADDRESS ?? "", row.GOVAREANO ?? "");
+      const where = parseLocation(row.ADDRESS ?? "", row.GOVAREANO ?? "");
       if (!where) {
         stat.locationFailed++;
         continue;
       }
+      if (where.district === UNKNOWN_DISTRICT) unknownDistricts++;
 
       const venue: Venue = {
         id: clean(row.HOSP_ID),
@@ -146,8 +148,11 @@ export function buildFromRecords(input: BuildInput): BuildResult {
         note: clean(row.HOLIDAY_REMARK_CNAME),
       };
 
-      recordDistrictReading(census, where);
-      placed.push({ venue, where });
+      const path = `${where.city}/${where.district}.json`;
+      const bucket = shards.get(path);
+      if (bucket) bucket.push(venue);
+      else shards.set(path, [venue]);
+
       bitmapById.set(venue.id, open);
       stat.kept++;
     }
@@ -156,14 +161,7 @@ export function buildFromRecords(input: BuildInput): BuildResult {
     assertGates(kind, stat, gates);
   }
 
-  // Second pass: every reading is now attested, so each venue can be filed
-  // under the district its own city voted for.
-  for (const { venue, where } of placed) {
-    const path = `${where.city}/${resolveDistrict(census, where)}.json`;
-    const bucket = shards.get(path);
-    if (bucket) bucket.push(venue);
-    else shards.set(path, [venue]);
-  }
+  assertUnknownDistricts(unknownDistricts, gates);
 
   // Index keys and shard contents are both walked in sorted order, so the
   // daily commit diff shows genuinely changed rows and nothing else. Counts are
@@ -216,6 +214,23 @@ function assertGates(kind: VenueKind, stat: BuildStats, gates: typeof GATES): vo
           `${(gates.maxLocationFailRate * 100).toFixed(0)}%`,
       );
     }
+  }
+}
+
+/**
+ * The one gate that is not about upstream collapse: it is how a district the
+ * frozen `DISTRICTS` table has never heard of announces itself. Corpus-wide
+ * rather than per kind — a new district takes its clinics and its pharmacies
+ * with it — and checked before any file is written, so a build that trips it
+ * leaves the previous `data/` in place.
+ */
+function assertUnknownDistricts(unknown: number, gates: typeof GATES): void {
+  if (unknown > gates.maxUnknown) {
+    throw new GateFailure(
+      `${unknown} venues have no district in src/lib/districts.ts, ceiling is ` +
+        `${gates.maxUnknown} — a district was probably created, split or renamed ` +
+        `upstream; regenerate the table from a checked build`,
+    );
   }
 }
 

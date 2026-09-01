@@ -1,3 +1,5 @@
+import { DISTRICTS } from "./districts";
+
 export interface Location {
   city: string;
   district: string;
@@ -60,7 +62,7 @@ const CITY_PATTERN = new RegExp(
  * No pattern can separate those, because the distinguishing fact — 板橋區 is a
  * district and 平鎮 is not — is about Taiwan, not about the string. So the
  * reading is not decided here: every district-shaped prefix is offered as a
- * candidate and the corpus picks between them (`resolveDistrict`).
+ * candidate and `parseLocation` keeps the one `DISTRICTS` knows.
  */
 const DISTRICT_SUFFIXES = "區鄉鎮市";
 
@@ -95,9 +97,9 @@ export function normaliseAddress(address: string): string {
  * Every district-shaped prefix of an address remainder, longest first.
  *
  * The first entry is the reading a single address can justify on its own; the
- * rest are the shorter readings the corpus may prefer. Empty when nothing
- * district-shaped starts the remainder — an address that names a 里 instead of
- * a 區, most often.
+ * rest are the shorter readings that may be the real district. Empty when
+ * nothing district-shaped starts the remainder — an address that names a 里
+ * instead of a 區, most often.
  */
 export function districtCandidates(remainder: string): string[] {
   let cjk = 0;
@@ -118,93 +120,40 @@ export function districtCandidates(remainder: string): string[] {
   return candidates;
 }
 
-export interface CityCandidates {
-  city: string;
-  /** Every district reading of the address, longest first. May be empty. */
-  candidates: string[];
-}
-
 /**
- * Resolve the city and enumerate the district readings, without committing to
- * one. The build collects these over every record, then resolves each against
- * the census the whole corpus produced.
+ * Resolve a venue to a city and district from the address alone.
  *
  * City resolution is belt-and-braces: the address prefix first, then the
  * GOVAREANO code. Measured over the full datasets this reaches 100%. Returns
  * `null` only when both signals fail — such a record cannot be placed anywhere
  * and the caller must drop it.
+ *
+ * The district is then the first candidate reading `DISTRICTS` lists for that
+ * city. Candidates arrive longest first, so a longer real district beats a
+ * shorter one; measured over all 29,698 addresses on 2026-09-01 no address has
+ * two known readings, so that preference decides nothing today, and when it
+ * ever does the longer reading is what the address literally spells.
+ *
+ * Nothing here depends on the rest of the corpus: a district attested by one
+ * ambiguous address resolves exactly as one attested by eight hundred clean
+ * ones. District resolution reaches 99.96%; the remainder are addresses that
+ * name a 里 instead of a 區, or misspell the 區 outright, and they land in
+ * `UNKNOWN_DISTRICT` so they stay reachable at city level instead of being
+ * silently dropped or minting a district of their own.
  */
-export function parseCityCandidates(address: string, govAreaNo: string): CityCandidates | null {
+export function parseLocation(address: string, govAreaNo: string): Location | null {
   const normalised = normaliseAddress((address ?? "").trim());
   const cityPrefix = normalised.match(CITY_PATTERN)?.[1];
   const city = cityPrefix ?? GOV_AREA_TO_CITY[(govAreaNo ?? "").trim()];
   if (!city) return null;
 
-  const remainder = cityPrefix ? normalised.slice(cityPrefix.length) : "";
-  return { city, candidates: districtCandidates(remainder) };
-}
-
-/**
- * city → district name → how many addresses read longest as that name.
- *
- * This is the whole district whitelist, and it is derived from the corpus being
- * built rather than from a table that can rot. A real district is the longest
- * reading of nearly every address in it, so it accumulates hundreds of votes; a
- * name only a street name can produce (板橋區區, 東區光鎮) accumulates a handful.
- * Kept per city, so 新市區 being a 臺南市 district says nothing about 高雄市.
- */
-export type DistrictCensus = Map<string, Map<string, number>>;
-
-/**
- * Cast one address's vote. Must be the only writer, so the tally and
- * `resolveDistrict` agree on which reading is being counted.
- */
-export function recordDistrictReading(census: DistrictCensus, where: CityCandidates): void {
-  const longest = where.candidates[0];
-  if (longest === undefined) return;
-
-  const counts = census.get(where.city);
-  if (counts) counts.set(longest, (counts.get(longest) ?? 0) + 1);
-  else census.set(where.city, new Map([[longest, 1]]));
-}
-
-/**
- * Pick the reading the corpus attests most often.
- *
- * Candidates arrive longest first and the comparison is strict, so an
- * unattested address keeps its longest reading only when nothing shorter is
- * attested either — and if no reading is attested at all, it lands in
- * `UNKNOWN_DISTRICT` rather than inventing a district bucket for one venue.
- * Measured 2026-09-01: 523 of 29,698 addresses are ambiguous, and the smallest
- * winning margin is 3 votes to 0 (左鎮區 over 左鎮).
- */
-export function resolveDistrict(census: DistrictCensus, where: CityCandidates): string {
-  const counts = census.get(where.city);
-  let best = UNKNOWN_DISTRICT;
-  let bestVotes = 0;
-
-  for (const candidate of where.candidates) {
-    const votes = counts?.get(candidate) ?? 0;
-    if (votes > bestVotes) {
-      best = candidate;
-      bestVotes = votes;
+  // Without a city prefix there is no remainder to read a district from — the
+  // city came from the code alone.
+  if (cityPrefix) {
+    const districts = DISTRICTS[city];
+    for (const candidate of districtCandidates(normalised.slice(cityPrefix.length))) {
+      if (districts?.[candidate]) return { city, district: candidate };
     }
   }
-  return best;
-}
-
-/**
- * Resolve a venue to a city and district from the address alone.
- *
- * Without a corpus the longest reading is the best a single address can do, so
- * this cannot separate 板橋區區運路 from 平鎮區環南路 — the build goes through
- * `parseCityCandidates` and `resolveDistrict` for that. District resolution
- * reaches 99.96%; the remainder are addresses that name a 里 instead of a 區,
- * which land in `UNKNOWN_DISTRICT` so they stay reachable at city level instead
- * of being silently dropped.
- */
-export function parseLocation(address: string, govAreaNo: string): Location | null {
-  const where = parseCityCandidates(address, govAreaNo);
-  if (!where) return null;
-  return { city: where.city, district: where.candidates[0] ?? UNKNOWN_DISTRICT };
+  return { city, district: UNKNOWN_DISTRICT };
 }

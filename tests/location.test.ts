@@ -1,14 +1,11 @@
 import { describe, it, expect } from "vitest";
+import { DISTRICTS } from "../src/lib/districts";
 import {
   parseLocation,
   normaliseAddress,
   districtCandidates,
-  parseCityCandidates,
-  recordDistrictReading,
-  resolveDistrict,
   GOV_AREA_TO_CITY,
   UNKNOWN_DISTRICT,
-  type DistrictCensus,
 } from "../src/lib/location";
 
 describe("normaliseAddress", () => {
@@ -127,126 +124,104 @@ describe("districtCandidates", () => {
   });
 });
 
-describe("resolveDistrict", () => {
-  /** Build a census the way the build's first pass does. */
-  const censusOf = (addresses: [string, string][]): DistrictCensus => {
-    const census: DistrictCensus = new Map();
-    for (const [address, govAreaNo] of addresses) {
-      const where = parseCityCandidates(address, govAreaNo);
-      if (where) recordDistrictReading(census, where);
-    }
-    return census;
-  };
+describe("parseLocation — districts the pattern alone cannot read", () => {
+  const cases: [string, string, string, string][] = [
+    // The seven from the defect report: a street name that starts with a
+    // suffix character, on both sides of the ambiguity.
+    ["新北市板橋區區公所前街１號", "65000", "新北市", "板橋區"],
+    ["臺北市信義區市民大道五段８號", "63000", "臺北市", "信義區"],
+    ["金門縣金湖鎮市港路１號", "09020", "金門縣", "金湖鎮"],
+    ["桃園市平鎮區環南路１００號", "68000", "桃園市", "平鎮區"],
+    ["高雄市前鎮區一心二路５０號", "64000", "高雄市", "前鎮區"],
+    ["臺南市左鎮區中正路１號", "10021", "臺南市", "左鎮區"],
+    ["臺南市新市區華興街１號", "10021", "臺南市", "新市區"],
+    // Three readings: 前鎮區鎮 is too long, 前鎮 too short, and only the middle
+    // one is a district — so neither end of the candidate list is safe to take.
+    ["高雄市前鎮區鎮榮街４５號", "64000", "高雄市", "前鎮區"],
+    // Two characters of the street name look like a district suffix.
+    ["新竹市東區光鎮里南大路５４９號１樓", "10018", "新竹市", "東區"],
+  ];
 
-  const resolve = (census: DistrictCensus, address: string, govAreaNo: string): string =>
-    resolveDistrict(census, parseCityCandidates(address, govAreaNo)!);
+  for (const [address, govAreaNo, city, district] of cases) {
+    it(`reads ${address} as ${district}`, () => {
+      expect(parseLocation(address, govAreaNo)).toEqual({ city, district });
+    });
+  }
 
-  it("prefers the shorter reading when the corpus knows it as a district", () => {
-    const census = censusOf([
-      ["新北市板橋區文化路一段１號", "65000"],
-      ["新北市板橋區中山路二段２號", "65000"],
-      ["新北市板橋區區運路２８號１樓、２樓", "65000"],
-    ]);
-    expect(resolve(census, "新北市板橋區區運路２８號１樓、２樓", "65000")).toBe("板橋區");
+  it("resolves a district attested by a single ambiguous address", () => {
+    // THE case the discarded corpus vote got wrong. When a city's only 板橋區
+    // address is one whose longest reading is the phantom 板橋區區, a vote casts
+    // that address's single ballot for the phantom, real 板橋區 finishes with
+    // zero, and the venue is filed under a district that does not exist.
+    //
+    // A table lookup cannot be talked into that, and this one call is the whole
+    // proof: resolution reads one address and one frozen table, so there is no
+    // corpus to be rare in.
+    expect(parseLocation("新北市板橋區區運路２８號１樓、２樓", "65000")).toEqual({
+      city: "新北市",
+      district: "板橋區",
+    });
   });
 
-  it("keeps the longer reading when the shorter one is not a district", () => {
-    // 平鎮/前鎮/左鎮/新市 are not districts, so the corpus never votes for them
-    // however many addresses it sees.
-    const census = censusOf([
-      ["桃園市平鎮區環南路１００號", "68000"],
-      ["高雄市前鎮區一心二路５０號", "64000"],
-      ["臺南市左鎮區中正路１號", "10021"],
-      ["臺南市新市區華興街１號", "10021"],
-    ]);
-    expect(resolve(census, "桃園市平鎮區環南路１００號", "68000")).toBe("平鎮區");
-    expect(resolve(census, "高雄市前鎮區一心二路５０號", "64000")).toBe("前鎮區");
-    expect(resolve(census, "臺南市左鎮區中正路１號", "10021")).toBe("左鎮區");
-    expect(resolve(census, "臺南市新市區華興街１號", "10021")).toBe("新市區");
+  it("does not let one city's street name name another city's district", () => {
+    expect(parseLocation("臺南市新市區華興街１號", "10021")).toEqual({
+      city: "臺南市",
+      district: "新市區",
+    });
+    // 新市區 is 臺南市's, and 高雄市 has no district of that name — so the same
+    // string must not resolve there.
+    expect(parseLocation("高雄市新市區華興街１號", "64000")).toEqual({
+      city: "高雄市",
+      district: UNKNOWN_DISTRICT,
+    });
   });
 
-  it("resolves the whole table of addresses the pattern alone cannot", () => {
-    // Corpus-shaped: each real district is attested by more clean addresses
-    // than the one street name that misleads a single-address read.
-    const census = censusOf([
-      ["新北市板橋區文化路一段１號", "65000"],
-      ["新北市板橋區中山路二段２號", "65000"],
-      ["臺北市信義區松高路１號", "63000"],
-      ["臺北市信義區松仁路２號", "63000"],
-      ["金門縣金湖鎮復興路１號", "09020"],
-      ["金門縣金湖鎮太湖路２號", "09020"],
-      ["桃園市平鎮區環南路１００號", "68000"],
-      ["高雄市前鎮區一心二路５０號", "64000"],
-      ["臺南市左鎮區中正路１號", "10021"],
-      ["臺南市新市區華興街１號", "10021"],
-      ["新北市板橋區區公所前街１號", "65000"],
-      ["臺北市信義區市民大道五段８號", "63000"],
-      ["金門縣金湖鎮市港路１號", "09020"],
-    ]);
-    const cases: [string, string, string][] = [
-      ["新北市板橋區區公所前街１號", "65000", "板橋區"],
-      ["臺北市信義區市民大道五段８號", "63000", "信義區"],
-      ["金門縣金湖鎮市港路１號", "09020", "金湖鎮"],
-      ["桃園市平鎮區環南路１００號", "68000", "平鎮區"],
-      ["高雄市前鎮區一心二路５０號", "64000", "前鎮區"],
-      ["臺南市左鎮區中正路１號", "10021", "左鎮區"],
-      ["臺南市新市區華興街１號", "10021", "新市區"],
-    ];
-    for (const [address, govAreaNo, district] of cases) {
-      expect(resolve(census, address, govAreaNo)).toBe(district);
-    }
-  });
-
-  it("keeps the longest reading when two readings are equally attested", () => {
-    // A tie is a genuine "cannot tell", and the longest reading is what a
-    // single address already justifies. Measured over the 2026-09-01 corpus no
-    // tie occurs: the tightest real contest is 3 votes to 0.
-    const census = censusOf([
-      ["新北市板橋區文化路一段１號", "65000"],
-      ["新北市板橋區區公所前街１號", "65000"],
-    ]);
-    expect(resolve(census, "新北市板橋區區公所前街１號", "65000")).toBe("板橋區區");
-  });
-
-  it("buckets the address when the corpus knows none of its candidates", () => {
-    const census = censusOf([["臺北市大安區辛亥路３段１５號", "63000"]]);
-    // 前鎮鄉 does not exist and neither does 前鎮 — inventing either as a
-    // district bucket would be worse than a visible 其他.
-    expect(resolve(census, "高雄市前鎮鄉一心二路５０號", "64000")).toBe(UNKNOWN_DISTRICT);
-    expect(resolve(census, "臺北市關帝里南門街８６號", "63000")).toBe(UNKNOWN_DISTRICT);
-  });
-
-  it("counts votes per city, so districts cannot leak between cities", () => {
-    const census = censusOf([
-      ["臺南市新市區華興街１號", "10021"],
-      ["臺南市新市區中山路２號", "10021"],
-    ]);
-    // 新市區 is well attested in 臺南市 and unknown in 高雄市.
-    expect(resolve(census, "臺南市新市區華興街１號", "10021")).toBe("新市區");
-    expect(resolve(census, "高雄市新市區華興街１號", "64000")).toBe(UNKNOWN_DISTRICT);
+  it("buckets an address whose readings are all unknown", () => {
+    // 前鎮鄉 does not exist and neither does 前鎮; inventing either as a
+    // district for one venue is worse than a visible 其他.
+    expect(parseLocation("高雄市前鎮鄉一心二路５０號", "64000")).toEqual({
+      city: "高雄市",
+      district: UNKNOWN_DISTRICT,
+    });
+    // An upstream typo: 湖口市 does not exist, and the real 湖口鄉 follows it in
+    // the same string. Reading past the typo is deliberately not attempted.
+    expect(parseLocation("新竹縣湖口市湖口鄉中正路一段１８５號", "10004")).toEqual({
+      city: "新竹縣",
+      district: UNKNOWN_DISTRICT,
+    });
   });
 });
 
-describe("parseCityCandidates", () => {
-  it("reports the city with every district reading of the remainder", () => {
-    expect(parseCityCandidates("新北市板橋區區運路２８號", "65000")).toEqual({
-      city: "新北市",
-      candidates: ["板橋區區", "板橋區"],
-    });
+describe("DISTRICTS", () => {
+  const names = Object.entries(DISTRICTS).flatMap(([city, ds]) =>
+    Object.keys(ds).map((d) => `${city}/${d}`),
+  );
+
+  it("holds the 366 districts the verified build attested, across 22 cities", () => {
+    expect(Object.keys(DISTRICTS)).toHaveLength(22);
+    expect(names).toHaveLength(366);
   });
 
-  it("normalises the address before reading the district", () => {
-    expect(parseCityCandidates("桃園縣中壢市龍東路38號", "68000")).toEqual({
-      city: "桃園市",
-      candidates: ["中壢區"],
-    });
+  it("lists only names district resolution can actually match", () => {
+    // A table entry the candidate reader can never produce is dead weight and
+    // probably a corrupted line. Note the obvious check — "no name ends in two
+    // suffix characters, since that is what the greedy read produced" — is not
+    // available: 平鎮區, 左鎮區, 新市區 and 前鎮區 all really do, which is the
+    // entire defect. Only the frozen table separates them from 板橋區區.
+    const unreachable = Object.values(DISTRICTS)
+      .flatMap((ds) => Object.keys(ds))
+      .filter((d) => !districtCandidates(d).includes(d));
+    expect(unreachable).toEqual([]);
   });
 
-  it("has no candidates when the city came from GOVAREANO alone", () => {
-    expect(parseCityCandidates("", "63000")).toEqual({ city: "臺北市", candidates: [] });
+  it("excludes the phantom the discarded vote shipped", () => {
+    // 湖口市 does not exist; it came from one typo'd address, and a phantom in
+    // the table would be permanent in a way a phantom in one build was not.
+    expect(DISTRICTS["新竹縣"]?.["湖口市"]).toBeUndefined();
+    expect(DISTRICTS["新竹縣"]?.["湖口鄉"]).toBe(true);
   });
 
-  it("returns null when neither signal yields a city", () => {
-    expect(parseCityCandidates("地址不詳", "99999")).toBeNull();
+  it("has no bucket named 其他, which is a fallback and not a district", () => {
+    expect(names.filter((n) => n.endsWith(`/${UNKNOWN_DISTRICT}`))).toEqual([]);
   });
 });

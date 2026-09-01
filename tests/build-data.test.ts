@@ -40,6 +40,7 @@ const testGates = (over: Partial<typeof GATES> = {}): typeof GATES => ({
   minPharmacies: 1,
   maxHoursFailRate: 1,
   maxLocationFailRate: 1,
+  maxUnknown: 99,
   ...over,
 });
 
@@ -240,6 +241,7 @@ describe("buildFromRecords — gates", () => {
       minPharmacies: 7_000,
       maxHoursFailRate: 0.01,
       maxLocationFailRate: 0.02,
+      maxUnknown: 50,
     });
   });
 });
@@ -270,45 +272,32 @@ describe("buildFromRecords — cross-check against D21006", () => {
   });
 });
 
-describe("buildFromRecords — district census", () => {
-  /** A row whose district must be decided by the corpus rather than the string. */
+describe("buildFromRecords — district resolution", () => {
+  /** A row whose district the address string alone cannot settle. */
   const at = (id: string, address: string, govAreaNo: string): NhiRecord =>
     clinic({ HOSP_ID: id, HOSP_NAME: id, ADDRESS: address, GOVAREANO: govAreaNo });
 
-  it("files a venue under the district the corpus voted for, not the longest reading", () => {
-    // 區運路 is a street in 板橋區, so the longest reading invents 板橋區區.
+  it("files a venue under the district, not the longest reading of its address", () => {
+    // 區運路 is a street in 板橋區, so the longest reading invents 板橋區區. The
+    // ambiguous address stands alone here — no clean 板橋區 address keeps it
+    // company — because resolution must not depend on what else is in the file.
     const r = buildFromRecords(
       input({
-        clinics: [
-          ...rows(3, "clinic"),
-          at("clean-1", "新北市板橋區文化路一段１號", "65000"),
-          at("clean-2", "新北市板橋區中山路二段２號", "65000"),
-          at("eaten", "新北市板橋區區運路２８號１樓、２樓", "65000"),
-        ],
+        clinics: [...rows(3, "clinic"), at("eaten", "新北市板橋區區運路２８號１樓、２樓", "65000")],
       }),
     );
     expect([...r.shards.keys()]).not.toContain("新北市/板橋區區.json");
-    expect(r.shards.get("新北市/板橋區.json")!.map((v) => v.id)).toEqual([
-      "clean-1",
-      "clean-2",
-      "eaten",
-    ]);
+    expect(r.shards.get("新北市/板橋區.json")!.map((v) => v.id)).toEqual(["eaten"]);
+    expect(r.index.cities["新北市"]!["板橋區"]!.counts).toEqual({ clinic: 1, pharmacy: 0 });
   });
 
   it("keeps a district whose own second character is a suffix character", () => {
-    // 平鎮區 has no unambiguous occurrence anywhere: the shortest reading of
-    // every 平鎮區 address stops at 平鎮. It must not be demoted to 其他.
+    // Every 平鎮區 address also reads as 平鎮, which is nothing. The district
+    // must not be demoted to 其他 on that account.
     const r = buildFromRecords(
-      input({
-        clinics: [
-          ...rows(3, "clinic"),
-          at("pj-1", "桃園市平鎮區環南路１００號", "68000"),
-          at("pj-2", "桃園市平鎮區中豐路２號", "68000"),
-        ],
-      }),
+      input({ clinics: [...rows(3, "clinic"), at("pj-1", "桃園市平鎮區環南路１００號", "68000")] }),
     );
-    expect([...r.shards.keys()]).toContain("桃園市/平鎮區.json");
-    expect(r.index.cities["桃園市"]!["平鎮區"]!.counts).toEqual({ clinic: 2, pharmacy: 0 });
+    expect(r.index.cities["桃園市"]!["平鎮區"]!.counts).toEqual({ clinic: 1, pharmacy: 0 });
     expect(r.index.cities["桃園市"]?.["平鎮"]).toBeUndefined();
     expect(r.index.cities["桃園市"]?.["其他"]).toBeUndefined();
   });
@@ -316,50 +305,50 @@ describe("buildFromRecords — district census", () => {
   it("picks the middle reading when three are possible", () => {
     // 前鎮區鎮榮街: longest reads 前鎮區鎮, shortest reads 前鎮, only 前鎮區 is real.
     const r = buildFromRecords(
-      input({
-        clinics: [
-          ...rows(3, "clinic"),
-          at("qj-1", "高雄市前鎮區一心二路５０號", "64000"),
-          at("qj-2", "高雄市前鎮區凱旋四路１號", "64000"),
-          at("qj-3", "高雄市前鎮區鎮榮街４５號", "64000"),
-        ],
-      }),
+      input({ clinics: [...rows(3, "clinic"), at("qj", "高雄市前鎮區鎮榮街４５號", "64000")] }),
     );
-    expect(r.shards.get("高雄市/前鎮區.json")!.map((v) => v.id)).toEqual([
-      "qj-1",
-      "qj-2",
-      "qj-3",
-    ]);
+    expect(r.shards.get("高雄市/前鎮區.json")!.map((v) => v.id)).toEqual(["qj"]);
     expect([...r.shards.keys()]).not.toContain("高雄市/前鎮區鎮.json");
   });
 
-  it("recovers a district when the street name contributes two characters", () => {
-    // 東區光鎮里: the longest reading swallows 光鎮 and invents 東區光鎮.
+  it("resolves per city, so one city's street name cannot rename another's district", () => {
     const r = buildFromRecords(
       input({
         clinics: [
           ...rows(3, "clinic"),
-          at("hc-1", "新竹市東區民族路１號", "10018"),
-          at("hc-2", "新竹市東區光復路一段２號", "10018"),
-          at("hc-3", "新竹市東區光鎮里南大路５４９號１樓", "10018"),
-        ],
-      }),
-    );
-    expect(r.shards.get("新竹市/東區.json")!.map((v) => v.id)).toEqual(["hc-1", "hc-2", "hc-3"]);
-    expect([...r.shards.keys()]).not.toContain("新竹市/東區光鎮.json");
-  });
-
-  it("votes per city, so one city's street name cannot rename another's district", () => {
-    const r = buildFromRecords(
-      input({
-        clinics: [
-          ...rows(3, "clinic"),
-          at("tn-1", "臺南市新市區華興街１號", "10021"),
-          at("kh-1", "高雄市新興區中山一路１號", "64000"),
+          at("tn", "臺南市新市區華興街１號", "10021"),
+          at("kh", "高雄市新市區華興街１號", "64000"),
         ],
       }),
     );
     expect([...r.shards.keys()]).toContain("臺南市/新市區.json");
-    expect([...r.shards.keys()]).toContain("高雄市/新興區.json");
+    expect(r.shards.get("高雄市/其他.json")!.map((v) => v.id)).toEqual(["kh"]);
+  });
+
+  it("aborts when too many venues have no district in the frozen table", () => {
+    const gates = testGates({ maxUnknown: 1 });
+    // 里 instead of 區: the shape a genuinely new district would also take.
+    const stray = (n: number, kind: string): NhiRecord[] =>
+      Array.from({ length: n }, (_, i) =>
+        at(`${kind}-stray-${i}`, "新竹市關帝里南門街８６號", "10018"),
+      );
+
+    expect(() =>
+      buildFromRecords(input({ gates, clinics: [...rows(3, "clinic"), ...stray(1, "c")] })),
+    ).not.toThrow();
+    expect(() =>
+      buildFromRecords(input({ gates, clinics: [...rows(3, "clinic"), ...stray(2, "c")] })),
+    ).toThrow(GateFailure);
+    // Counted corpus-wide: a new district brings clinics and pharmacies alike,
+    // so one of each must trip a ceiling of one.
+    expect(() =>
+      buildFromRecords(
+        input({
+          gates,
+          clinics: [...rows(3, "clinic"), ...stray(1, "c")],
+          pharmacies: [...rows(2, "pharmacy"), ...stray(1, "p")],
+        }),
+      ),
+    ).toThrow(/regenerate the table/);
   });
 });
