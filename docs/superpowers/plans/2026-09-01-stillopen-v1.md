@@ -1883,8 +1883,11 @@ REPO=sean1093/StillOpen
 git fetch -q origin main
 BEFORE=$(git rev-parse origin/main)
 # `gh run list` returns newest-first and run ids increase with creation time, so
-# the max over the sampled window is the newest run's id. 100 is the largest
-# single API page; the window only has to contain the newest run, not all runs.
+# the max over the sampled window is the newest run's id — a baseline needs only
+# the newest run to be in the window. The exactly-one guards below need a
+# stronger property: EVERY match must be in the window, or a second match could
+# hide off the page and N=1 would be wrong. Each guard therefore checks that the
+# window still reaches back past its baseline, and refuses if it does not.
 BEFORE_MAX=$(gh run list --workflow=data --limit 100 --json databaseId \
                --jq '[.[].databaseId] | max // 0')
 PAGES_MAX=$(gh run list --workflow=pages --limit 100 --json databaseId \
@@ -1907,6 +1910,8 @@ while [ -z "$ID" ]; do
                               and .headSha == \"$BEFORE\") | .databaseId]
                 | unique | .[]")
   N=$(printf '%s' "$IDS" | awk 'NF{n++} END{print n+0}')
+  FLOOR=$(gh run list --workflow=data --limit 100 --json databaseId --jq '[.[].databaseId] | min // 0')
+  [ "$FLOOR" -le "$BEFORE_MAX" ] || { echo "FAIL: the run window no longer reaches the baseline, so a second match could be hidden; let runs finish and re-run this check"; exit 1; }
   if [ "$N" -gt 1 ]; then
     echo "FAIL: $N data dispatches are in flight at $BEFORE:"
     printf '  %s\n' $IDS
@@ -2044,6 +2049,8 @@ while [ -z "$CHAINED" ]; do
                               and .headSha == \"$AFTER\") | .databaseId]
                 | unique | .[]")
   N=$(printf '%s' "$IDS" | awk 'NF{n++} END{print n+0}')
+  FLOOR=$(gh run list --workflow=pages --limit 100 --json databaseId --jq '[.[].databaseId] | min // 0')
+  [ "$FLOOR" -le "$PAGES_MAX" ] || { echo "FAIL: the run window no longer reaches the baseline, so a second match could be hidden; let runs finish and re-run this check"; exit 1; }
   if [ "$N" -gt 1 ]; then
     echo "FAIL: $N chained pages runs match $AFTER:"
     printf '  %s\n' $IDS
@@ -2806,6 +2813,8 @@ while [ -z "$ID" ]; do
                               and .databaseId > $PAGES_MAX) | .databaseId]
                 | unique | .[]")
   N=$(printf '%s' "$IDS" | awk 'NF{n++} END{print n+0}')
+  FLOOR=$(gh run list --workflow=pages --limit 100 --json databaseId --jq '[.[].databaseId] | min // 0')
+  [ "$FLOOR" -le "$PAGES_MAX" ] || { echo "FAIL: the run window no longer reaches the baseline, so a second match could be hidden; let runs finish and re-run this check"; exit 1; }
   if [ "$N" -gt 1 ]; then
     echo "FAIL: $N new pages runs match $SHA:"
     printf '  %s\n' $IDS
