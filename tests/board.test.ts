@@ -98,6 +98,28 @@ describe("renderBoard", () => {
     expect(link?.getAttribute("href")).toBe("tel:0212345678");
   });
 
+  it("links 9-digit numbers too, not just 10-digit ones", () => {
+    renderBoard(root, {
+      venues: [venue("a", { tel: "(049)2691404" })],
+      at: sundayEvening,
+      day,
+      sourceDate: "2026-09-01",
+    });
+    const link = root.querySelector<HTMLAnchorElement>('a[href^="tel:"]');
+    expect(link?.getAttribute("href")).toBe("tel:0492691404");
+  });
+
+  it("renders an unlinkable number as text rather than dialling a wrong one", () => {
+    renderBoard(root, {
+      venues: [venue("a", { tel: "(07)6250942#23" })],
+      at: sundayEvening,
+      day,
+      sourceDate: "2026-09-01",
+    });
+    expect(root.textContent).toContain("(07)6250942#23");
+    expect(root.querySelector('a[href^="tel:"]')).toBeNull();
+  });
+
   it("warns on a public holiday", () => {
     renderBoard(root, {
       venues: [venue("a")],
@@ -133,6 +155,10 @@ describe("renderBoard", () => {
   it("says plainly when nothing is open", () => {
     renderBoard(root, { venues: [], at: sundayEvening, day, sourceDate: "2026-09-01" });
     expect(root.textContent).toContain("沒有登記看診");
+    // The h1 is read first on a phone, so it must not claim 還開著 over an empty
+    // list. It still names the session, and the time table still disambiguates 晚上.
+    expect(root.querySelector("h1")?.textContent).toBe("星期日晚上");
+    expect(root.textContent).toContain("18:00");
   });
 
   it("escapes venue text rather than injecting it as markup", () => {

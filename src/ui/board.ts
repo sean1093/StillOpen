@@ -39,7 +39,9 @@ export function renderBoard(root: HTMLElement, args: BoardArgs): void {
   let title: string;
   let sub: string;
   if (at.kind === "in") {
-    title = `${describeSlot(position)} 還開著`;
+    // Never claim 還開著 above an empty list. The h1 is what someone scanning on
+    // a phone reads first, and it must not contradict the paragraph below it.
+    title = open.length > 0 ? `${describeSlot(position)} 還開著` : describeSlot(position);
     sub = slotTimeLabel(position.slotIndex);
   } else {
     title = at.reason === "lunch" ? "現在是午休時間" : "現在多數院所已打烊";
@@ -121,11 +123,25 @@ function venueRow(v: Venue): HTMLElement {
   }
 
   if (v.tel) {
-    const tel = document.createElement("a");
-    tel.className = "mt-2 inline-block text-sm text-open underline";
-    tel.href = `tel:${v.tel.replace(/[^\d+]/g, "")}`;
-    tel.textContent = `打電話 ${v.tel}`;
-    li.append(tel);
+    const digits = v.tel.replace(/[^\d+]/g, "");
+    // 29 of 29,691 source numbers strip to something other than the 9 or 10
+    // digits a Taiwanese number has: missing or duplicated area codes, two
+    // extensions, one full-width digit. A href built from those dials a
+    // stranger, which is worse than no link in a product whose whole
+    // instruction is "call first" — so those render as plain text and the user
+    // dials the displayed number, which is the source of truth either way.
+    if (digits.length === 9 || digits.length === 10) {
+      const tel = document.createElement("a");
+      tel.className = "mt-2 inline-block text-sm text-open underline";
+      tel.href = `tel:${digits}`;
+      tel.textContent = `打電話 ${v.tel}`;
+      li.append(tel);
+    } else {
+      const tel = document.createElement("p");
+      tel.className = "mt-2 text-sm text-ink";
+      tel.textContent = `電話 ${v.tel}`;
+      li.append(tel);
+    }
   }
 
   return li;
