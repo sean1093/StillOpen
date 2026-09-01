@@ -9,6 +9,9 @@
     "type": "git",
     "url": "git+https://github.com/sean1093/StillOpen.git"
   },
+  "engines": {
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
