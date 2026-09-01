@@ -5,7 +5,9 @@
 台北市，整座城市，星期天晚上，只有 **7 家**診所有兒科。
 這個工具就是為了那 7 家而存在。
 
-- **狀態：** 設計階段 — 尚未實作。設計文件見 [`docs/superpowers/specs/2026-09-01-stillopen-design.md`](docs/superpowers/specs/2026-09-01-stillopen-design.md)
+- **狀態：** v1 實作完成，尚未部署上線。
+  設計文件見 [`docs/superpowers/specs/2026-09-01-stillopen-design.md`](docs/superpowers/specs/2026-09-01-stillopen-design.md)，
+  實作計畫見 [`docs/superpowers/plans/2026-09-01-stillopen-v1.md`](docs/superpowers/plans/2026-09-01-stillopen-v1.md)。
 - **服務時段：** 刻意只做週末、每日 18:00 後、國定假日。平日白天全台有 18,706 家診所在營業，那不需要工具。
 - **架構：** 沒有後端、沒有資料庫、沒有 API 金鑰。GitHub Actions 每日拉取健保署開放資料，產出靜態 JSON，GitHub Pages 直接服務。
 

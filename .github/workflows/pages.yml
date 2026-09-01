@@ -1,0 +1,69 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+  # The daily `data` run commits with GITHUB_TOKEN, and GitHub suppresses
+  # workflow triggers from that token, so its push does NOT match the `push`
+  # trigger above. Without this, data/ would refresh in the repo while the
+  # deployed site kept serving whatever was baked at the last human push.
+  # `branches` here filters the TRIGGERING run's head branch, so a `data` run
+  # dispatched on some other branch can never deploy.
+  workflow_run:
+    workflows: [data]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # A gate-aborted or otherwise failed `data` run must not deploy. Any other
+    # trigger is unconditional.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # With no `ref`, checkout pins GITHUB_REF@GITHUB_SHA of the *current*
+          # event. For push and workflow_dispatch that is exactly the commit we
+          # want. For workflow_run, GITHUB_SHA is the default branch head as
+          # snapshotted when the event was created — which should already
+          # include the data commit, but resolving `main` at checkout time makes
+          # that a guarantee instead of a timing assumption.
+          #
+          # NEVER use github.event.workflow_run.head_sha here. That is the
+          # commit the `data` run *started* from, i.e. the tree from before its
+          # own data refresh — it would deploy stale data while both workflows
+          # report green.
+          ref: ${{ github.event_name == 'workflow_run' && 'main' || '' }}
+
+      - uses: actions/setup-node@v4
+        with:
+          # package.json engines is ^20.19.0 || ^22.12.0 || >=24.0.0 and .npmrc
+          # sets engine-strict=true, so npm ci hard-fails outside that range.
+          # 24 is the current LTS; 20 went end-of-life on 2026-04-30.
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - id: deploy
+        uses: actions/deploy-pages@v4
