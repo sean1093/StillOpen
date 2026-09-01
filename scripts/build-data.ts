@@ -33,6 +33,21 @@ import {
  * while still aborting on the systemic case. It cannot catch a new district of
  * two or three venues — those land visibly in 其他 until the table is
  * regenerated — but it does catch one big enough to matter.
+ *
+ * `maxFellThrough` guards that gate's blind spot. Candidates arrive longest
+ * first, so an address whose longest reading is unknown falls through to a
+ * shorter known one — 板橋區區運路 reads first as 板橋區區, which is nothing, then
+ * as 板橋區, which is right. That is the intended repair and every build has
+ * some: measured 2026-09-01, 105 venues (81 clinics, 24 pharmacies) over 24
+ * rejected readings, every one a real district followed by a street name
+ * starting with 區/鄉/鎮/市 — 樹林區鎮前街, 斗六市鎮南路, 前鎮區鎮榮街. The same
+ * mechanism would also file a genuinely new district's venues into a shorter
+ * neighbour's shard, silently and without ever touching `maxUnknown`, since
+ * they never reach 其他. 250 is ~2.4x the measured figure: the count tracks how
+ * many venues sit on those suffix streets, so it moves with venue churn and
+ * nothing else, while a new district large enough to matter — the largest
+ * today is 板橋區 with 825 venues — carries it well past the ceiling. Like
+ * `maxUnknown` it cannot catch a new district of two or three venues.
  */
 export const GATES: Readonly<{
   minClinics: number;
@@ -40,12 +55,14 @@ export const GATES: Readonly<{
   maxHoursFailRate: number;
   maxLocationFailRate: number;
   maxUnknown: number;
+  maxFellThrough: number;
 }> = {
   minClinics: 20_000,
   minPharmacies: 7_000,
   maxHoursFailRate: 0.01,
   maxLocationFailRate: 0.02,
   maxUnknown: 50,
+  maxFellThrough: 250,
 };
 
 export class GateFailure extends Error {
@@ -61,6 +78,8 @@ export interface BuildStats {
   kept: number;
   hoursFailed: number;
   locationFailed: number;
+  /** Resolved only after a longer district reading was rejected. */
+  fellThrough: number;
 }
 
 export interface BuildResult {
@@ -98,6 +117,7 @@ export function buildFromRecords(input: BuildInput): BuildResult {
   const stats = {} as Record<VenueKind, BuildStats>;
   const bitmapById = new Map<string, string>();
   let unknownDistricts = 0;
+  let fellThrough = 0;
 
   for (const [kind, rows] of [
     ["clinic", input.clinics],
@@ -109,6 +129,7 @@ export function buildFromRecords(input: BuildInput): BuildResult {
       kept: 0,
       hoursFailed: 0,
       locationFailed: 0,
+      fellThrough: 0,
     };
 
     for (const row of rows) {
@@ -126,7 +147,9 @@ export function buildFromRecords(input: BuildInput): BuildResult {
         continue;
       }
 
-      const where = parseLocation(row.ADDRESS ?? "", row.GOVAREANO ?? "");
+      // `stat` doubles as the tally sink: a fall-through is a venue that kept
+      // its district only because a longer reading was discarded.
+      const where = parseLocation(row.ADDRESS ?? "", row.GOVAREANO ?? "", stat);
       if (!where) {
         stat.locationFailed++;
         continue;
@@ -158,10 +181,12 @@ export function buildFromRecords(input: BuildInput): BuildResult {
     }
 
     stats[kind] = stat;
+    fellThrough += stat.fellThrough;
     assertGates(kind, stat, gates);
   }
 
   assertUnknownDistricts(unknownDistricts, gates);
+  assertFellThrough(fellThrough, gates);
 
   // Index keys and shard contents are both walked in sorted order, so the
   // daily commit diff shows genuinely changed rows and nothing else. Counts are
@@ -235,6 +260,29 @@ function assertUnknownDistricts(unknown: number, gates: typeof GATES): void {
 }
 
 /**
+ * The same question as `assertUnknownDistricts` asks, for the districts that
+ * never reach 其他 to be asked about. An unknown reading with a known shorter
+ * reading behind it resolves to the shorter one, so those venues are filed in a
+ * real district's shard and counted nowhere — silently misplaced rather than
+ * visibly parked. Falling through is the intended repair for an ambiguous
+ * address, so this is a ceiling well above the everyday figure rather than a
+ * floor of zero: it is watching for a systemic shift, not for the mechanism
+ * working. Corpus-wide and checked before any file is written, for the same
+ * reasons as the gate above.
+ */
+function assertFellThrough(fellThrough: number, gates: typeof GATES): void {
+  if (fellThrough > gates.maxFellThrough) {
+    throw new GateFailure(
+      `${fellThrough} venues resolved only by discarding a longer district reading, ` +
+        `ceiling is ${gates.maxFellThrough} — a district was probably created, split ` +
+        `or renamed upstream, or an address format changed; these venues are filed ` +
+        `under a shorter district rather than 其他, so check src/lib/districts.ts and ` +
+        `regenerate it from a checked build`,
+    );
+  }
+}
+
+/**
  * Compare our parsed bitmap against D21006's published 看診星期 for the same
  * venue. A free oracle for the parser. Warning only — the two datasets refresh
  * on slightly different cycles, so a handful of disagreements is normal and
@@ -301,7 +349,8 @@ async function main(): Promise<void> {
   for (const [kind, s] of Object.entries(result.stats)) {
     console.log(
       `${kind}: raw ${s.raw} → live ${s.live} → kept ${s.kept} ` +
-        `(hours failed ${s.hoursFailed}, location failed ${s.locationFailed})`,
+        `(hours failed ${s.hoursFailed}, location failed ${s.locationFailed}, ` +
+        `fell through ${s.fellThrough})`,
     );
   }
   console.log(`shards: ${result.shards.size}, source date: ${result.index.sourceDate}`);

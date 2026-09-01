@@ -6,6 +6,7 @@ import {
   districtCandidates,
   GOV_AREA_TO_CITY,
   UNKNOWN_DISTRICT,
+  type LocationTally,
 } from "../src/lib/location";
 
 describe("normaliseAddress", () => {
@@ -189,6 +190,46 @@ describe("parseLocation — districts the pattern alone cannot read", () => {
       city: "新竹縣",
       district: UNKNOWN_DISTRICT,
     });
+  });
+});
+
+describe("parseLocation — the optional tally", () => {
+  const tally = (): LocationTally => ({ fellThrough: 0 });
+
+  it("counts an answer reached only after a longer reading was rejected", () => {
+    const t = tally();
+    // 板橋區區 is rejected, 板橋區 answers.
+    expect(parseLocation("新北市板橋區區運路２８號１樓、２樓", "65000", t)).toEqual({
+      city: "新北市",
+      district: "板橋區",
+    });
+    expect(t.fellThrough).toBe(1);
+  });
+
+  it("stays at zero when the address's own longest reading is the answer", () => {
+    const t = tally();
+    parseLocation("臺北市大安區辛亥路３段１５號", "63000", t);
+    // 平鎮區 is the longest reading of its address even though 平鎮 follows it.
+    parseLocation("桃園市平鎮區環南路１００號", "68000", t);
+    // No candidate matched at all: 其他 is counted by the build's own ceiling,
+    // and charging it here too would double-count the same venue.
+    parseLocation("高雄市新市區華興街１號", "64000", t);
+    // No city prefix, so there is no remainder and no reading to reject.
+    parseLocation("", "63000", t);
+    expect(t.fellThrough).toBe(0);
+  });
+
+  it("resolves identically whether or not a tally is passed", () => {
+    for (const [address, govAreaNo] of [
+      ["新北市板橋區區運路２８號１樓、２樓", "65000"],
+      ["高雄市前鎮區鎮榮街４５號", "64000"],
+      ["新竹市關帝里南門街８６號", "10018"],
+      ["地址不詳", "99999"],
+    ] as const) {
+      expect(parseLocation(address, govAreaNo, tally())).toEqual(
+        parseLocation(address, govAreaNo),
+      );
+    }
   });
 });
 

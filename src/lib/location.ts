@@ -5,6 +5,19 @@ export interface Location {
   district: string;
 }
 
+/**
+ * Counters `parseLocation` reports into, for a caller that wants to watch how
+ * resolution is reaching its answers. Optional, and read by nothing here: the
+ * resolved `Location` never depends on whether a tally was passed.
+ */
+export interface LocationTally {
+  /**
+   * Addresses whose own longest district-shaped reading was not in `DISTRICTS`
+   * and a shorter one was — resolution succeeded only by falling through.
+   */
+  fellThrough: number;
+}
+
 /** Shown to the user, so it must read as a real bucket rather than an error. */
 export const UNKNOWN_DISTRICT = "其他";
 
@@ -140,8 +153,15 @@ export function districtCandidates(remainder: string): string[] {
  * name a 里 instead of a 區, or misspell the 區 outright, and they land in
  * `UNKNOWN_DISTRICT` so they stay reachable at city level instead of being
  * silently dropped or minting a district of their own.
+ *
+ * `tally`, when supplied, is told when the answer was reached only after a
+ * longer candidate was rejected. Purely an observation: it changes no answer.
  */
-export function parseLocation(address: string, govAreaNo: string): Location | null {
+export function parseLocation(
+  address: string,
+  govAreaNo: string,
+  tally?: LocationTally,
+): Location | null {
   const normalised = normaliseAddress((address ?? "").trim());
   const cityPrefix = normalised.match(CITY_PATTERN)?.[1];
   const city = cityPrefix ?? GOV_AREA_TO_CITY[(govAreaNo ?? "").trim()];
@@ -151,8 +171,13 @@ export function parseLocation(address: string, govAreaNo: string): Location | nu
   // city came from the code alone.
   if (cityPrefix) {
     const districts = DISTRICTS[city];
+    let rejected = false;
     for (const candidate of districtCandidates(normalised.slice(cityPrefix.length))) {
-      if (districts?.[candidate]) return { city, district: candidate };
+      if (districts?.[candidate]) {
+        if (rejected && tally) tally.fellThrough++;
+        return { city, district: candidate };
+      }
+      rejected = true;
     }
   }
   return { city, district: UNKNOWN_DISTRICT };

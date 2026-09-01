@@ -41,6 +41,7 @@ const testGates = (over: Partial<typeof GATES> = {}): typeof GATES => ({
   maxHoursFailRate: 1,
   maxLocationFailRate: 1,
   maxUnknown: 99,
+  maxFellThrough: 99,
   ...over,
 });
 
@@ -235,13 +236,16 @@ describe("buildFromRecords — gates", () => {
     // 22,081 clinics and 7,610 pharmacies kept. A floor derived from the raw
     // counts instead would put minPharmacies at 8,000 — above the value it is
     // checked against, failing every build. Change these only with fresh
-    // measurements from a live run.
+    // measurements from a live run. maxFellThrough is baselined the same way:
+    // 105 venues resolved by falling through on 2026-09-01, so 250 is ~2.4x the
+    // everyday figure.
     expect(GATES).toEqual({
       minClinics: 20_000,
       minPharmacies: 7_000,
       maxHoursFailRate: 0.01,
       maxLocationFailRate: 0.02,
       maxUnknown: 50,
+      maxFellThrough: 250,
     });
   });
 });
@@ -276,6 +280,15 @@ describe("buildFromRecords — district resolution", () => {
   /** A row whose district the address string alone cannot settle. */
   const at = (id: string, address: string, govAreaNo: string): NhiRecord =>
     clinic({ HOSP_ID: id, HOSP_NAME: id, ADDRESS: address, GOVAREANO: govAreaNo });
+
+  /**
+   * Rows that resolve only by falling through: 區運路 is a street in 板橋區, so
+   * each address reads as 板橋區區 — nothing — before it reads as 板橋區.
+   */
+  const fellThrough = (n: number, kind: string): NhiRecord[] =>
+    Array.from({ length: n }, (_, i) =>
+      at(`${kind}-fell-${i}`, "新北市板橋區區運路２８號１樓、２樓", "65000"),
+    );
 
   it("files a venue under the district, not the longest reading of its address", () => {
     // 區運路 is a street in 板橋區, so the longest reading invents 板橋區區. The
@@ -350,5 +363,63 @@ describe("buildFromRecords — district resolution", () => {
         }),
       ),
     ).toThrow(/regenerate the table/);
+  });
+
+  it("counts the venues that resolved only by falling through", () => {
+    const r = buildFromRecords(
+      input({
+        clinics: [
+          ...rows(3, "clinic"),
+          ...fellThrough(1, "c"),
+          // Falls through every reading and lands in 其他, which `maxUnknown`
+          // already counts — the two ceilings must not both charge for it.
+          at("stray", "高雄市新市區華興街１號", "64000"),
+        ],
+      }),
+    );
+    // The three default rows read 大安區 on their first candidate, as do the
+    // pharmacies; only the 區運路 row needed a second reading.
+    expect(r.stats.clinic.fellThrough).toBe(1);
+    expect(r.stats.clinic.kept).toBe(5);
+    expect(r.stats.pharmacy.fellThrough).toBe(0);
+    expect(r.shards.get("高雄市/其他.json")!.map((v) => v.id)).toEqual(["stray"]);
+  });
+
+  it("aborts when too many venues resolve only by falling through", () => {
+    const gates = testGates({ maxFellThrough: 1 });
+    expect(() =>
+      buildFromRecords(input({ gates, clinics: [...rows(3, "clinic"), ...fellThrough(1, "c")] })),
+    ).not.toThrow();
+    expect(() =>
+      buildFromRecords(input({ gates, clinics: [...rows(3, "clinic"), ...fellThrough(2, "c")] })),
+    ).toThrow(GateFailure);
+    // Corpus-wide for the same reason as the ceiling above: a district that
+    // vanished into a shorter neighbour took both kinds with it.
+    expect(() =>
+      buildFromRecords(
+        input({
+          gates,
+          clinics: [...rows(3, "clinic"), ...fellThrough(1, "c")],
+          pharmacies: [...rows(2, "pharmacy"), ...fellThrough(1, "p")],
+        }),
+      ),
+    ).toThrow(/src\/lib\/districts\.ts/);
+  });
+
+  it("leaves the measured everyday figure clear of the production ceiling", () => {
+    // 105 venues fell through on 2026-09-01 — 81 clinics and 24 pharmacies, all
+    // of them the intended repair. The real ceiling must sit above that and
+    // below a systemic shift; only the floors are relaxed here.
+    const gates = testGates({ maxFellThrough: GATES.maxFellThrough });
+    expect(() =>
+      buildFromRecords(
+        input({ gates, clinics: fellThrough(81, "c"), pharmacies: fellThrough(24, "p") }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      buildFromRecords(
+        input({ gates, clinics: fellThrough(GATES.maxFellThrough + 1, "c") }),
+      ),
+    ).toThrow(GateFailure);
   });
 });
