@@ -1,0 +1,30 @@
+{
+  "name": "stillopen",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "選你的行政區，看此刻還開著的健保特約診所與藥局。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sean1093/StillOpen.git"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build:data": "tsx scripts/build-data.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "autoprefixer": "^10.5.4",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^3.4.19",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  }
+}
