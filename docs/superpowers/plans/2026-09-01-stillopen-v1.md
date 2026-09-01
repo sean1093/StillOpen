@@ -1911,7 +1911,8 @@ while [ -z "$ID" ]; do
                 | unique | .[]")
   N=$(printf '%s' "$IDS" | awk 'NF{n++} END{print n+0}')
   FLOOR=$(gh run list --workflow=data --limit 100 --json databaseId --jq '[.[].databaseId] | min // 0')
-  [ "$FLOOR" -le "$BEFORE_MAX" ] || { echo "FAIL: the run window no longer reaches the baseline, so a second match could be hidden; let runs finish and re-run this check"; exit 1; }
+  # A zero baseline means no runs existed, so any window covers every candidate.
+  [ "$BEFORE_MAX" -eq 0 ] || [ "$FLOOR" -le "$BEFORE_MAX" ] || { echo "FAIL: the run window no longer reaches the baseline, so a second match could be hidden; let runs finish and re-run this check"; exit 1; }
   if [ "$N" -gt 1 ]; then
     echo "FAIL: $N data dispatches are in flight at $BEFORE:"
     printf '  %s\n' $IDS
@@ -2050,7 +2051,8 @@ while [ -z "$CHAINED" ]; do
                 | unique | .[]")
   N=$(printf '%s' "$IDS" | awk 'NF{n++} END{print n+0}')
   FLOOR=$(gh run list --workflow=pages --limit 100 --json databaseId --jq '[.[].databaseId] | min // 0')
-  [ "$FLOOR" -le "$PAGES_MAX" ] || { echo "FAIL: the run window no longer reaches the baseline, so a second match could be hidden; let runs finish and re-run this check"; exit 1; }
+  # A zero baseline means no runs existed, so any window covers every candidate.
+  [ "$PAGES_MAX" -eq 0 ] || [ "$FLOOR" -le "$PAGES_MAX" ] || { echo "FAIL: the run window no longer reaches the baseline, so a second match could be hidden; let runs finish and re-run this check"; exit 1; }
   if [ "$N" -gt 1 ]; then
     echo "FAIL: $N chained pages runs match $AFTER:"
     printf '  %s\n' $IDS
@@ -2814,7 +2816,8 @@ while [ -z "$ID" ]; do
                 | unique | .[]")
   N=$(printf '%s' "$IDS" | awk 'NF{n++} END{print n+0}')
   FLOOR=$(gh run list --workflow=pages --limit 100 --json databaseId --jq '[.[].databaseId] | min // 0')
-  [ "$FLOOR" -le "$PAGES_MAX" ] || { echo "FAIL: the run window no longer reaches the baseline, so a second match could be hidden; let runs finish and re-run this check"; exit 1; }
+  # A zero baseline means no runs existed, so any window covers every candidate.
+  [ "$PAGES_MAX" -eq 0 ] || [ "$FLOOR" -le "$PAGES_MAX" ] || { echo "FAIL: the run window no longer reaches the baseline, so a second match could be hidden; let runs finish and re-run this check"; exit 1; }
   if [ "$N" -gt 1 ]; then
     echo "FAIL: $N new pages runs match $SHA:"
     printf '  %s\n' $IDS
