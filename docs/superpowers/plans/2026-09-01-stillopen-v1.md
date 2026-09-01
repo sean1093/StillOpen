@@ -2535,34 +2535,185 @@ jobs:
 
 - [ ] **Step 2: Enable Pages and deploy**
 
+Run in `bash`. Every check below either proves what it claims or exits non-zero;
+there is no `|| true` anywhere, and no step accepts "the latest run" as evidence.
+
 ```bash
-git add .github/workflows/pages.yml
-git commit -m "ci: deploy the site to GitHub Pages"
+set -euo pipefail
+REPO=sean1093/StillOpen
+
+# The workflow is already committed. Publishing it to main is what triggers the
+# first deploy: a human push is not GITHUB_TOKEN-suppressed, so `pages` starts on
+# its own. Do not `gh workflow run pages` here — then you cannot tell which
+# trigger you observed, which is the thing being verified.
+git checkout main
+git merge --ff-only feat/v1
 git push
-gh api -X POST repos/sean1093/StillOpen/pages -f build_type=workflow || true
-gh workflow run pages
-sleep 60
-gh run list --workflow=pages --limit 1
+SHA=$(git rev-parse HEAD)
+echo "deploying commit $SHA"
+
+# Enable Pages. 201 = created, 409 = already enabled. Anything else — 401/403
+# auth, 404 wrong repo, 422 bad config — is a real failure and must stop here,
+# otherwise a pre-existing successful run makes broken setup look fine.
+if err=$(gh api -X POST "repos/$REPO/pages" -f build_type=workflow 2>&1 >/dev/null); then
+  echo "pages: created"
+elif printf '%s' "$err" | grep -q 'HTTP 409'; then
+  echo "pages: already enabled, continuing"
+else
+  echo "FAIL: could not enable Pages"; printf '%s\n' "$err"; exit 1
+fi
+
+# Assert the resulting state rather than trusting the POST.
+gh api "repos/$REPO/pages" --jq '"build_type=\(.build_type) status=\(.status) url=\(.html_url)"'
 ```
 
-Expected: the run reaches `completed / success`.
+Expected — `status` may be `building` this early, which is fine; the run poll
+below is the real gate. `build_type` must be `workflow`:
+
+```
+deploying commit <40-hex>
+pages: created                  # or: pages: already enabled, continuing
+build_type=workflow status=built url=https://sean1093.github.io/StillOpen/
+```
+
+Now identify the run **for this commit** and poll it to a terminal conclusion.
+`gh run list --limit 1` is a snapshot: it can return an older successful run, or
+one still queued, and either would be mistaken for proof.
+
+```bash
+ID=""
+deadline=$(( $(date +%s) + 120 ))
+while [ -z "$ID" ]; do
+  ID=$(gh run list --workflow=pages --limit 50 \
+         --json databaseId,headSha \
+         --jq "[.[] | select(.headSha == \"$SHA\")] | first | .databaseId // empty")
+  [ -n "$ID" ] && break
+  [ "$(date +%s)" -ge "$deadline" ] && { echo "FAIL: no pages run for $SHA after 120s"; exit 1; }
+  sleep 5
+done
+echo "pages run id: $ID"
+
+deadline=$(( $(date +%s) + 900 ))
+while :; do
+  out=$(gh run view "$ID" --json status,conclusion --jq '"\(.status) \(.conclusion // "-")"')
+  st=${out%% *}; cc=${out##* }
+  echo "  $(date -u +%H:%M:%S)Z status=$st conclusion=$cc"
+  [ "$st" = "completed" ] && break
+  [ "$(date +%s)" -ge "$deadline" ] && { echo "FAIL: pages run $ID still '$st' after 900s"; exit 1; }
+  sleep 10
+done
+[ "$cc" = "success" ] || { echo "FAIL: pages run $ID concluded '$cc'"; gh run view "$ID" --log-failed; exit 1; }
+echo "PASS: pages run $ID succeeded for $SHA"
+```
+
+Expected — the run id must be newly created, and the last line must appear:
+
+```
+pages run id: <digits>
+  HH:MM:SSZ status=in_progress conclusion=-
+  HH:MM:SSZ status=in_progress conclusion=-
+  HH:MM:SSZ status=completed conclusion=success
+PASS: pages run <digits> succeeded for <40-hex>
+```
+
+Any other terminal `conclusion` (`failure`, `cancelled`, `timed_out`,
+`action_required`) exits non-zero and dumps the failing logs. If the run was
+created before Pages was enabled it fails inside `deploy-pages`; re-run it with
+`gh run rerun "$ID"` and poll again rather than debugging the workflow.
 
 - [ ] **Step 3: Verify the live site serves real data**
 
 ```bash
+set -euo pipefail
 BASE=https://sean1093.github.io/StillOpen
-curl -sf "$BASE/data/index.json" | node -e "
-let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
-  const i=JSON.parse(s);
-  console.log('sourceDate', i.sourceDate);
-  console.log('cities', Object.keys(i.cities).length);
-  console.log('臺北市 大安區', JSON.stringify(i.cities['臺北市']['大安區']));
-})"
-curl -sfo /dev/null -w "index.html %{http_code}\n" "$BASE/"
+SHA=${SHA:-$(git rev-parse origin/main)}
+
+curl -fsS "$BASE/data/index.json" -o /tmp/live-index.json \
+  || { echo "FAIL: index.json not served"; exit 1; }
+node -e "
+const i=JSON.parse(require('fs').readFileSync('/tmp/live-index.json','utf8'));
+console.log('sourceDate', i.sourceDate);
+console.log('generatedAt', i.generatedAt);
+console.log('cities', Object.keys(i.cities).length);
+console.log('districts', Object.values(i.cities).reduce((n,c)=>n+Object.keys(c).length,0));
+console.log('臺北市 大安區', JSON.stringify(i.cities['臺北市']['大安區']));
+"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")
+echo "index.html $code"
+[ "$code" = 200 ] || { echo "FAIL: site root not served"; exit 1; }
 ```
 
-Expected: 22 cities, a plausible `sourceDate`, a non-zero 大安區 count, and
-`index.html 200`.
+Expected — 22 cities, 393 districts, a non-zero 大安區 count, and a 200:
+
+```
+sourceDate 2026-08-31
+generatedAt 2026-09-01T07:53:15.338Z
+cities 22
+districts 393
+臺北市 大安區 {"file":"臺北市/大安區.json","counts":{"clinic":642,"pharmacy":96}}
+index.html 200
+```
+
+**Deployed successfully and deployed the current data are different claims.**
+Prove the second one by comparing the served index byte-for-byte against the
+commit that was actually deployed:
+
+```bash
+live=$(shasum -a 256 < /tmp/live-index.json | cut -d' ' -f1)
+want=$(git show "$SHA:data/index.json" | shasum -a 256 | cut -d' ' -f1)
+echo "live   $live"
+echo "commit $want"
+if [ "$live" != "$want" ]; then
+  echo "FAIL: deployed index.json is not the one committed at $SHA"
+  echo "  live   generatedAt: $(node -pe "JSON.parse(require('fs').readFileSync('/tmp/live-index.json','utf8')).generatedAt")"
+  echo "  commit generatedAt: $(git show "$SHA:data/index.json" | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).generatedAt")"
+  exit 1
+fi
+echo "PASS: deployed index.json is byte-identical to $SHA"
+```
+
+Expected: two identical hashes and the `PASS` line. On mismatch the two
+`generatedAt` values are printed side by side — an **older** live value is a
+stale deploy, which is the failure this pipeline is shaped to prevent. Re-run
+this same block after any later deploy (including a cron-chained one) to prove
+that refresh reached the site.
+
+**The CJK shard path is the most likely way this deployment silently
+half-works.** Shard filenames contain Chinese characters; `src/main.ts` fetches
+`${import.meta.env.BASE_URL}data/${entry.file}` with `entry.file` holding raw
+CJK, which `fetch()` percent-encodes on the way out. That path has only ever
+been exercised against Vite's preview server. Pages is a different host:
+
+```bash
+# data/臺北市/大安區.json, percent-encoded exactly as the browser sends it
+SHARD='data/%E8%87%BA%E5%8C%97%E5%B8%82/%E5%A4%A7%E5%AE%89%E5%8D%80.json'
+code=$(curl -s -o /tmp/live-shard.json -w '%{http_code}' "$BASE/$SHARD")
+echo "cjk shard $code"
+[ "$code" = 200 ] || { echo "FAIL: CJK shard path not served"; exit 1; }
+node -e "
+const fs=require('fs');
+const v=JSON.parse(fs.readFileSync('/tmp/live-shard.json','utf8'));
+const c=JSON.parse(fs.readFileSync('/tmp/live-index.json','utf8')).cities['臺北市']['大安區'].counts;
+const want=c.clinic+c.pharmacy;
+console.log('venues', v.length, '| index says', want);
+if(v.length!==want){console.error('FAIL: shard and index disagree');process.exit(1)}
+console.log('PASS: CJK shard served and consistent with index');
+"
+```
+
+Expected (the count is derived from the live index, so it stays correct after
+any rebuild; today it is 738 = 642 clinics + 96 pharmacies):
+
+```
+cjk shard 200
+venues 738 | index says 738
+PASS: CJK shard served and consistent with index
+```
+
+A `404` here while Step 3's `index.json` returned 200 is the half-working case:
+the board renders, the city list populates, and every district you click is
+empty.
 
 - [ ] **Step 4: Confirm the scarcity claim holds on the live data**
 
