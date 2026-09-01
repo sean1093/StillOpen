@@ -1,0 +1,63 @@
+name: data
+
+on:
+  schedule:
+    # 07:30 Asia/Taipei. GitHub cron is UTC and Taipei is a fixed UTC+8 with no
+    # DST, so 07:30 local is 23:30 UTC on the *previous* UTC day.
+    - cron: "30 23 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: data
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+
+    env:
+      # scripts/build-data.ts derives both the CLOSESHOP cutoff (`today`) and the
+      # office-calendar year from the process's local clock. The cron fires at
+      # 23:30 UTC, which is already 07:30 the *next* day in Taipei, so on a
+      # default-UTC runner every scheduled build would be one Taipei day behind:
+      # a contract expiring today would stay listed for an extra day, and the
+      # 1 January run would fetch the previous year's calendar. Pin the zone so
+      # the build's "today" matches the data's. Delete this and the daily run
+      # silently goes stale by a day.
+      TZ: Asia/Taipei
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # package.json engines is ^20.19.0 || ^22.12.0 || >=24.0.0 and .npmrc
+          # sets engine-strict=true, so npm ci hard-fails outside that range.
+          # 24 is the current LTS; 20 went end-of-life on 2026-04-30.
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify logic before touching data
+        run: npm test
+
+      # A gate failure exits non-zero here, so the commit step never runs and
+      # yesterday's data keeps serving.
+      - name: Rebuild data
+        run: npm run build:data
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then
+            echo "no data change"
+            exit 0
+          fi
+          git commit -m "chore(data): refresh from NHI open data"
+          git push
