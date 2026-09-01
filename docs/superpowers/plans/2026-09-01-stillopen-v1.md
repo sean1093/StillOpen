@@ -1876,8 +1876,11 @@ git fetch -q origin main
 BEFORE=$(git rev-parse origin/main)
 BEFORE_MAX=$(gh run list --workflow=data --limit 50 --json databaseId \
                --jq '[.[].databaseId] | max // 0')
+PAGES_MAX=$(gh run list --workflow=pages --limit 50 --json databaseId \
+              --jq '[.[].databaseId] | max // 0')
 echo "main before: $BEFORE"
 echo "highest existing data run id: $BEFORE_MAX"
+echo "highest existing pages run id: $PAGES_MAX"
 
 gh workflow run data --ref main
 
@@ -1939,13 +1942,23 @@ if [ "$CLAIMED" = nothing ]; then
     || { echo "FAIL: run claimed no change but main moved $BEFORE -> $AFTER"; exit 1; }
   echo "PASS: ran and correctly found nothing to commit"
 else
-  [ "$AFTER" != "$BEFORE" ] \
-    || { echo "FAIL: run rebuilt data but main did not move — the commit or push was lost"; exit 1; }
-  git log --format='%h %an %s' "$BEFORE..$AFTER"
-  outside=$(git diff --name-only "$BEFORE" "$AFTER" | sed '/^data\//d')
+  # `AFTER != BEFORE` is NOT proof this run pushed: a concurrent data-only commit
+  # would move main and pass. Bind the verdict to the commit THIS run created.
+  # The workflow's `git commit` prints "[main <short>] chore(data): refresh…".
+  BOT_SHA=$(printf '%s\n' "$LOG" \
+    | sed -n 's/.*\[[^]]* \([0-9a-f]\{7,\}\)\] chore(data): refresh from NHI open data.*/\1/p' \
+    | tail -1)
+  [ -n "$BOT_SHA" ] \
+    || { echo "FAIL: run neither reported 'no data change' nor printed a commit line"; exit 1; }
+  git merge-base --is-ancestor "$BOT_SHA" "$AFTER" \
+    || { echo "FAIL: the run's commit $BOT_SHA never reached origin/main — the push was lost"; exit 1; }
+  git log -1 --format='%h %an %s' "$BOT_SHA"
+  [ "$(git log -1 --format='%an' "$BOT_SHA")" = "github-actions[bot]" ] \
+    || { echo "FAIL: $BOT_SHA was not authored by github-actions[bot]"; exit 1; }
+  outside=$(git show --name-only --format= "$BOT_SHA" | sed '/^data\//d;/^$/d')
   [ -z "$outside" ] \
     || { echo "FAIL: the bot commit touched files outside data/:"; printf '%s\n' "$outside"; exit 1; }
-  echo "PASS: ran and committed a real data refresh"
+  echo "PASS: ran and committed a real data refresh ($BOT_SHA)"
 fi
 ```
 
@@ -1971,15 +1984,30 @@ PASS: ran and correctly found nothing to commit
 claimed: committed
 main after: <new 40-hex>
 <short> github-actions[bot] chore(data): refresh from NHI open data
-PASS: ran and committed a real data refresh
+PASS: ran and committed a real data refresh (<short>)
 ```
 
-Finally, confirm the chain into deployment. A `pages` run with
+Finally, confirm the chain into deployment. A **newly created** `pages` run with
 `"event": "workflow_run"` must appear — that is the GITHUB_TOKEN-suppression
-workaround doing its job, and its absence means the site will never refresh:
+workaround doing its job, and its absence means the site will never refresh.
+Listing runs would only display them, so this asserts, and it keys on an id
+baseline taken before the dispatch so an old chained run cannot satisfy it.
+
+After the `data` run has concluded:
 
 ```bash
-gh run list --workflow=pages --limit 5 --json databaseId,event,status,conclusion
+CHAINED=""
+deadline=$(( $(date +%s) + 180 ))
+while [ -z "$CHAINED" ]; do
+  CHAINED=$(gh run list --workflow=pages --limit 50 --json databaseId,event \
+              --jq "[.[] | select(.databaseId > $PAGES_MAX and .event == \"workflow_run\")]
+                    | first | .databaseId // empty")
+  [ -n "$CHAINED" ] && break
+  [ "$(date +%s)" -ge "$deadline" ] \
+    && { echo "FAIL: no pages run chained off the data run — the site will never refresh"; exit 1; }
+  sleep 10
+done
+echo "PASS: pages run $CHAINED chained off data (event=workflow_run)"
 ```
 
 Then re-run the byte-identity block in **Task 8 Step 3** with `SHA` unset, so it
@@ -2660,6 +2688,15 @@ there is no `|| true` anywhere, and no step accepts "the latest run" as evidence
 set -euo pipefail
 REPO=sean1093/StillOpen
 
+# Record the run-id baseline BEFORE the push, so the deploy run can be required
+# to be newly created. A prior run can carry the same headSha — for example one
+# triggered by this push before Pages was enabled, or an earlier deploy of the
+# same commit — and selecting it would report PASS without ever validating this
+# attempt.
+PAGES_MAX=$(gh run list --workflow=pages --limit 50 --json databaseId \
+              --jq '[.[].databaseId] | max // 0')
+echo "highest existing pages run id: $PAGES_MAX"
+
 # The workflow is already committed. Publishing it to main is what triggers the
 # first deploy: a human push is not GITHUB_TOKEN-suppressed, so `pages` starts on
 # its own. Do not `gh workflow run pages` here — then you cannot tell which
@@ -2681,22 +2718,32 @@ else
   echo "FAIL: could not enable Pages"; printf '%s\n' "$err"; exit 1
 fi
 
-# Assert the resulting state rather than trusting the POST.
-gh api "repos/$REPO/pages" --jq '"build_type=\(.build_type) status=\(.status) url=\(.html_url)"'
+# Assert the resulting state. Printing the fields would pass for ANY build_type,
+# including a legacy branch-based Pages config that will never serve this
+# workflow's artifact, so the value is tested rather than displayed.
+PAGES_STATE=$(gh api "repos/$REPO/pages" --jq '"\(.build_type) \(.status) \(.html_url)"')
+echo "pages state: $PAGES_STATE"
+[ "${PAGES_STATE%% *}" = workflow ] \
+  || { echo "FAIL: Pages build_type is '${PAGES_STATE%% *}', expected 'workflow'"; exit 1; }
 ```
 
 Expected — `status` may be `building` this early, which is fine; the run poll
-below is the real gate. `build_type` must be `workflow`:
+below is the real gate. `build_type` is asserted, not merely shown:
 
 ```
+highest existing pages run id: <digits or 0>
 deploying commit <40-hex>
 pages: created                  # or: pages: already enabled, continuing
-build_type=workflow status=built url=https://sean1093.github.io/StillOpen/
+pages state: workflow built https://sean1093.github.io/StillOpen/
 ```
 
-Now identify the run **for this commit** and poll it to a terminal conclusion.
-`gh run list --limit 1` is a snapshot: it can return an older successful run, or
-one still queued, and either would be mistaken for proof.
+Now identify the run **for this deployment attempt** and poll it to a terminal
+conclusion. `gh run list --limit 1` is a snapshot: it can return an older
+successful run, or one still queued, and either would be mistaken for proof.
+Matching `headSha` alone is not enough either — a prior run can carry the same
+commit. Requiring **both** a matching `headSha` and an id above the pre-push
+baseline pins it to this attempt: the SHA proves it is building the right tree,
+the id proves it is not a recycled result.
 
 ```bash
 ID=""
@@ -2704,9 +2751,10 @@ deadline=$(( $(date +%s) + 120 ))
 while [ -z "$ID" ]; do
   ID=$(gh run list --workflow=pages --limit 50 \
          --json databaseId,headSha \
-         --jq "[.[] | select(.headSha == \"$SHA\")] | first | .databaseId // empty")
+         --jq "[.[] | select(.headSha == \"$SHA\" and .databaseId > $PAGES_MAX)]
+               | first | .databaseId // empty")
   [ -n "$ID" ] && break
-  [ "$(date +%s)" -ge "$deadline" ] && { echo "FAIL: no pages run for $SHA after 120s"; exit 1; }
+  [ "$(date +%s)" -ge "$deadline" ] && { echo "FAIL: no new pages run for $SHA after 120s"; exit 1; }
   sleep 5
 done
 echo "pages run id: $ID"
@@ -2752,9 +2800,24 @@ node -e "
 const i=JSON.parse(require('fs').readFileSync('/tmp/live-index.json','utf8'));
 console.log('sourceDate', i.sourceDate);
 console.log('generatedAt', i.generatedAt);
-console.log('cities', Object.keys(i.cities).length);
-console.log('districts', Object.values(i.cities).reduce((n,c)=>n+Object.keys(c).length,0));
-console.log('臺北市 大安區', JSON.stringify(i.cities['臺北市']['大安區']));
+const cities=Object.keys(i.cities).length;
+const districts=Object.values(i.cities).reduce((n,c)=>n+Object.keys(c).length,0);
+const da=i.cities['臺北市']?.['大安區'];
+console.log('cities', cities);
+console.log('districts', districts);
+console.log('臺北市 大安區', JSON.stringify(da));
+// Assert, do not merely display: a truncated or half-written index would print
+// small numbers and sail on to the next command. Exact equality is left to the
+// byte-identity check below, so these are the invariants that hold across any
+// rebuild.
+const bad=[];
+if(!/^\d{4}-\d{2}-\d{2}$/.test(i.sourceDate||'')) bad.push('sourceDate malformed');
+if(Number.isNaN(Date.parse(i.generatedAt||''))) bad.push('generatedAt unparseable');
+if(cities<22) bad.push(\`cities \${cities} < 22\`);
+if(districts<393) bad.push(\`districts \${districts} < 393\`);
+if(!da||!(da.counts?.clinic>0)) bad.push('臺北市 大安區 missing or has no clinics');
+if(bad.length){console.error('FAIL: '+bad.join('; '));process.exit(1)}
+console.log('PASS: index.json structurally sound');
 "
 
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")
@@ -2762,7 +2825,9 @@ echo "index.html $code"
 [ "$code" = 200 ] || { echo "FAIL: site root not served"; exit 1; }
 ```
 
-Expected — 22 cities, 393 districts, a non-zero 大安區 count, and a 200:
+Expected — 22 cities, 393 districts, a non-zero 大安區 count, and a 200. The
+floors are `>=`, not `==`, so a later rebuild that legitimately adds a district
+does not fail; shrinkage, which is what a truncated deploy looks like, does:
 
 ```
 sourceDate 2026-08-31
@@ -2770,6 +2835,7 @@ generatedAt 2026-09-01T07:53:15.338Z
 cities 22
 districts 393
 臺北市 大安區 {"file":"臺北市/大安區.json","counts":{"clinic":642,"pharmacy":96}}
+PASS: index.json structurally sound
 index.html 200
 ```
 
