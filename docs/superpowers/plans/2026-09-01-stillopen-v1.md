@@ -1870,12 +1870,11 @@ either wastes time or reads too early.
 
 The selector also requires `event == "workflow_dispatch"` and
 `headSha == "$BEFORE"`, so a run against a different commit cannot be picked up.
-**Residual, stated rather than papered over:** a second manual dispatch of `data`
-at the same commit, inside the same 120s window, would be indistinguishable from
-this one. There is no field that separates two identical dispatches, so this is
-the one selector in the procedure with a real — if narrow — false-pass path. It
-requires a concurrent manual dispatch by another actor on a single-maintainer
-repo. Task 8's Pages selector does not share it: it keys on `headSha` *and* id.
+Two dispatches at the *same* commit remain genuinely indistinguishable — GitHub
+exposes no field linking a `workflow_dispatch` to its caller — so rather than
+guess, the selector requires **exactly one** match and refuses when it sees more.
+That converts a silent false pass into a loud, actionable failure using only
+fields that exist.
 
 ```bash
 set -euo pipefail
@@ -1896,15 +1895,27 @@ echo "highest existing pages run id: $PAGES_MAX"
 
 gh workflow run data --ref main
 
+# `unique` so GitHub's re-run button, which reuses the run id, cannot read as a
+# second run. Zero matches means "not created yet" and keeps waiting; more than
+# one is refused rather than guessed at.
 ID=""
 deadline=$(( $(date +%s) + 120 ))
 while [ -z "$ID" ]; do
-  ID=$(gh run list --workflow=data --limit 100 --json databaseId,event,headSha \
-         --jq "[.[] | select(.databaseId > $BEFORE_MAX
-                             and .event == \"workflow_dispatch\"
-                             and .headSha == \"$BEFORE\")]
-               | first | .databaseId // empty")
-  [ -n "$ID" ] && break
+  IDS=$(gh run list --workflow=data --limit 100 --json databaseId,event,headSha \
+          --jq "[.[] | select(.databaseId > $BEFORE_MAX
+                              and .event == \"workflow_dispatch\"
+                              and .headSha == \"$BEFORE\") | .databaseId]
+                | unique | .[]")
+  N=$(printf '%s' "$IDS" | awk 'NF{n++} END{print n+0}')
+  if [ "$N" -gt 1 ]; then
+    echo "FAIL: $N data dispatches are in flight at $BEFORE:"
+    printf '  %s\n' $IDS
+    echo "  GitHub exposes no field linking a workflow_dispatch to its caller, so"
+    echo "  this check cannot tell them apart and will not guess. Wait for all of"
+    echo "  them to finish, then re-run this check against a single dispatch."
+    exit 1
+  fi
+  [ "$N" -eq 1 ] && { ID=$IDS; break; }
   [ "$(date +%s)" -ge "$deadline" ] && { echo "FAIL: dispatched data run never appeared"; exit 1; }
   sleep 5
 done
@@ -2006,10 +2017,15 @@ Finally, confirm the chain into deployment. A **newly created** `pages` run with
 workaround doing its job, and its absence means the site will never refresh.
 This is the highest-value assertion in the procedure, so it is keyed three ways:
 an id above the pre-dispatch baseline (newly created), `event == "workflow_run"`
-(chained rather than pushed), and `headSha == "$AFTER"` (chained off *this*
-data run's resulting `main`, not off some unrelated run that happened to land in
-the polling window). Requiring only the first two would let any concurrent
-`workflow_run` deploy print PASS while this chain was broken.
+(chained rather than pushed), and `headSha == "$AFTER"` (built from the `main`
+this data run left behind).
+
+Those three keys narrow it but do **not** attribute it. A `workflow_run` run
+carries no reference to the run that triggered it, so if `data` were dispatched
+twice at the same commit, the second dispatch's deploy would match all three
+keys just as well as the first's — and a broken chain for the run under test
+would be masked by its sibling. So this selector, like the dispatch selector,
+requires **exactly one** match and refuses otherwise.
 
 `$AFTER` is correct in both outcomes: it is `origin/main` after the data run,
 whether or not the bot committed. If a human pushes to `main` between the data
@@ -2022,12 +2038,21 @@ After the `data` run has concluded:
 CHAINED=""
 deadline=$(( $(date +%s) + 180 ))
 while [ -z "$CHAINED" ]; do
-  CHAINED=$(gh run list --workflow=pages --limit 100 --json databaseId,event,headSha \
-              --jq "[.[] | select(.databaseId > $PAGES_MAX
-                                  and .event == \"workflow_run\"
-                                  and .headSha == \"$AFTER\")]
-                    | first | .databaseId // empty")
-  [ -n "$CHAINED" ] && break
+  IDS=$(gh run list --workflow=pages --limit 100 --json databaseId,event,headSha \
+          --jq "[.[] | select(.databaseId > $PAGES_MAX
+                              and .event == \"workflow_run\"
+                              and .headSha == \"$AFTER\") | .databaseId]
+                | unique | .[]")
+  N=$(printf '%s' "$IDS" | awk 'NF{n++} END{print n+0}')
+  if [ "$N" -gt 1 ]; then
+    echo "FAIL: $N chained pages runs match $AFTER:"
+    printf '  %s\n' $IDS
+    echo "  A workflow_run run carries no reference to the specific run that"
+    echo "  triggered it, so this cannot attribute the chain and will not guess."
+    echo "  Wait for them to finish, then re-run against a single data dispatch."
+    exit 1
+  fi
+  [ "$N" -eq 1 ] && { CHAINED=$IDS; break; }
   [ "$(date +%s)" -ge "$deadline" ] \
     && { echo "FAIL: no pages run chained off the data run — the site will never refresh"; exit 1; }
   sleep 10
@@ -2771,14 +2796,24 @@ baseline pins it to this attempt: the SHA proves it is building the right tree,
 the id proves it is not a recycled result.
 
 ```bash
+# `unique` so a re-run, which reuses the id, cannot read as a second run. Zero
+# matches means "not created yet" and keeps waiting; more than one is refused.
 ID=""
 deadline=$(( $(date +%s) + 120 ))
 while [ -z "$ID" ]; do
-  ID=$(gh run list --workflow=pages --limit 100 \
-         --json databaseId,headSha \
-         --jq "[.[] | select(.headSha == \"$SHA\" and .databaseId > $PAGES_MAX)]
-               | first | .databaseId // empty")
-  [ -n "$ID" ] && break
+  IDS=$(gh run list --workflow=pages --limit 100 --json databaseId,headSha \
+          --jq "[.[] | select(.headSha == \"$SHA\"
+                              and .databaseId > $PAGES_MAX) | .databaseId]
+                | unique | .[]")
+  N=$(printf '%s' "$IDS" | awk 'NF{n++} END{print n+0}')
+  if [ "$N" -gt 1 ]; then
+    echo "FAIL: $N new pages runs match $SHA:"
+    printf '  %s\n' $IDS
+    echo "  Cannot tell which belongs to this deployment attempt, and will not"
+    echo "  guess. Wait for them to finish, then re-run this check."
+    exit 1
+  fi
+  [ "$N" -eq 1 ] && { ID=$IDS; break; }
   [ "$(date +%s)" -ge "$deadline" ] && { echo "FAIL: no new pages run for $SHA after 120s"; exit 1; }
   sleep 5
 done
