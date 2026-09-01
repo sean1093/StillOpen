@@ -1861,12 +1861,21 @@ Precondition: `data.yml` must already be on `main` — `workflow_dispatch` can o
 dispatch a workflow that exists on the target ref. In practice this step runs
 after the merge in Task 8 Step 2.
 
-A manual dispatch has no new commit to key on, so identify the run by **id**.
-Run ids increase monotonically, so recording the highest existing one first makes
-"the run I just started" unambiguous without depending on clock skew or on
-`--limit 1`, which is a snapshot and can return a stale or queued run. There is
-no fixed `sleep`: a guess at GitHub's queue latency either wastes time or reads
-too early.
+A manual dispatch produces no new commit, so it is identified by **id**: record
+the highest existing run id first, then require the selected run to exceed it.
+That is unambiguous without depending on clock skew, and unlike `--limit 1` — a
+snapshot that can return a stale or queued run — it cannot select something that
+already existed. There is no fixed `sleep`: a guess at GitHub's queue latency
+either wastes time or reads too early.
+
+The selector also requires `event == "workflow_dispatch"` and
+`headSha == "$BEFORE"`, so a run against a different commit cannot be picked up.
+**Residual, stated rather than papered over:** a second manual dispatch of `data`
+at the same commit, inside the same 120s window, would be indistinguishable from
+this one. There is no field that separates two identical dispatches, so this is
+the one selector in the procedure with a real — if narrow — false-pass path. It
+requires a concurrent manual dispatch by another actor on a single-maintainer
+repo. Task 8's Pages selector does not share it: it keys on `headSha` *and* id.
 
 ```bash
 set -euo pipefail
@@ -1874,9 +1883,12 @@ REPO=sean1093/StillOpen
 
 git fetch -q origin main
 BEFORE=$(git rev-parse origin/main)
-BEFORE_MAX=$(gh run list --workflow=data --limit 50 --json databaseId \
+# `gh run list` returns newest-first and run ids increase with creation time, so
+# the max over the sampled window is the newest run's id. 100 is the largest
+# single API page; the window only has to contain the newest run, not all runs.
+BEFORE_MAX=$(gh run list --workflow=data --limit 100 --json databaseId \
                --jq '[.[].databaseId] | max // 0')
-PAGES_MAX=$(gh run list --workflow=pages --limit 50 --json databaseId \
+PAGES_MAX=$(gh run list --workflow=pages --limit 100 --json databaseId \
               --jq '[.[].databaseId] | max // 0')
 echo "main before: $BEFORE"
 echo "highest existing data run id: $BEFORE_MAX"
@@ -1887,8 +1899,10 @@ gh workflow run data --ref main
 ID=""
 deadline=$(( $(date +%s) + 120 ))
 while [ -z "$ID" ]; do
-  ID=$(gh run list --workflow=data --limit 50 --json databaseId,event \
-         --jq "[.[] | select(.databaseId > $BEFORE_MAX and .event == \"workflow_dispatch\")]
+  ID=$(gh run list --workflow=data --limit 100 --json databaseId,event,headSha \
+         --jq "[.[] | select(.databaseId > $BEFORE_MAX
+                             and .event == \"workflow_dispatch\"
+                             and .headSha == \"$BEFORE\")]
                | first | .databaseId // empty")
   [ -n "$ID" ] && break
   [ "$(date +%s)" -ge "$deadline" ] && { echo "FAIL: dispatched data run never appeared"; exit 1; }
@@ -1990,8 +2004,17 @@ PASS: ran and committed a real data refresh (<short>)
 Finally, confirm the chain into deployment. A **newly created** `pages` run with
 `"event": "workflow_run"` must appear — that is the GITHUB_TOKEN-suppression
 workaround doing its job, and its absence means the site will never refresh.
-Listing runs would only display them, so this asserts, and it keys on an id
-baseline taken before the dispatch so an old chained run cannot satisfy it.
+This is the highest-value assertion in the procedure, so it is keyed three ways:
+an id above the pre-dispatch baseline (newly created), `event == "workflow_run"`
+(chained rather than pushed), and `headSha == "$AFTER"` (chained off *this*
+data run's resulting `main`, not off some unrelated run that happened to land in
+the polling window). Requiring only the first two would let any concurrent
+`workflow_run` deploy print PASS while this chain was broken.
+
+`$AFTER` is correct in both outcomes: it is `origin/main` after the data run,
+whether or not the bot committed. If a human pushes to `main` between the data
+run finishing and the chained event being created, the head moves past `$AFTER`
+and this times out — a false failure, which is the safe direction.
 
 After the `data` run has concluded:
 
@@ -1999,15 +2022,17 @@ After the `data` run has concluded:
 CHAINED=""
 deadline=$(( $(date +%s) + 180 ))
 while [ -z "$CHAINED" ]; do
-  CHAINED=$(gh run list --workflow=pages --limit 50 --json databaseId,event \
-              --jq "[.[] | select(.databaseId > $PAGES_MAX and .event == \"workflow_run\")]
+  CHAINED=$(gh run list --workflow=pages --limit 100 --json databaseId,event,headSha \
+              --jq "[.[] | select(.databaseId > $PAGES_MAX
+                                  and .event == \"workflow_run\"
+                                  and .headSha == \"$AFTER\")]
                     | first | .databaseId // empty")
   [ -n "$CHAINED" ] && break
   [ "$(date +%s)" -ge "$deadline" ] \
     && { echo "FAIL: no pages run chained off the data run — the site will never refresh"; exit 1; }
   sleep 10
 done
-echo "PASS: pages run $CHAINED chained off data (event=workflow_run)"
+echo "PASS: pages run $CHAINED chained off data at $AFTER (event=workflow_run)"
 ```
 
 Then re-run the byte-identity block in **Task 8 Step 3** with `SHA` unset, so it
@@ -2693,7 +2718,7 @@ REPO=sean1093/StillOpen
 # triggered by this push before Pages was enabled, or an earlier deploy of the
 # same commit — and selecting it would report PASS without ever validating this
 # attempt.
-PAGES_MAX=$(gh run list --workflow=pages --limit 50 --json databaseId \
+PAGES_MAX=$(gh run list --workflow=pages --limit 100 --json databaseId \
               --jq '[.[].databaseId] | max // 0')
 echo "highest existing pages run id: $PAGES_MAX"
 
@@ -2749,7 +2774,7 @@ the id proves it is not a recycled result.
 ID=""
 deadline=$(( $(date +%s) + 120 ))
 while [ -z "$ID" ]; do
-  ID=$(gh run list --workflow=pages --limit 50 \
+  ID=$(gh run list --workflow=pages --limit 100 \
          --json databaseId,headSha \
          --jq "[.[] | select(.headSha == \"$SHA\" and .databaseId > $PAGES_MAX)]
                | first | .databaseId // empty")
