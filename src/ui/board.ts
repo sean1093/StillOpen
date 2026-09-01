@@ -1,4 +1,4 @@
-import { isOpen } from "../lib/hours";
+import { SLOTS, isOpen } from "../lib/hours";
 import { SLOT_HOURS, describeSlot, type SlotPosition, type SlotResolution } from "../lib/slot";
 import type { DayClass } from "../lib/calendar";
 import type { Venue } from "../lib/types";
@@ -22,6 +22,15 @@ export interface BoardArgs {
   at: SlotResolution;
   day: DayClass;
   sourceDate: string;
+  /**
+   * Set when the office calendar could not be fetched, so no holiday check ran.
+   * Distinct from "no calendar published for this year", which is legitimate and
+   * warned about at build time — an unreachable calendar must be said out loud,
+   * or an ordinary-looking day implies a check that never happened.
+   */
+  calendarUnavailable?: boolean;
+  /** Set when these venues came from a previous session's cache, not the network. */
+  cachedAt?: string;
 }
 
 /**
@@ -49,6 +58,22 @@ export function renderBoard(root: HTMLElement, args: BoardArgs): void {
   }
   root.append(heading(title, sub));
 
+  // Ordered by how much they change the meaning of everything below.
+  if (args.cachedAt) {
+    root.append(
+      notice(
+        `目前無法取得最新資料，以下是 ${args.cachedAt} 存下的內容，院所時段可能已經改變。` +
+          "出門前務必先打電話確認。",
+      ),
+    );
+  }
+
+  if (args.calendarUnavailable) {
+    root.append(
+      notice("無法取得辦公日曆，今天是否為假日或補班沒有檢查到；若適逢連假，看診時段可能與下方登記不同。"),
+    );
+  }
+
   if (day.holiday) {
     root.append(notice(`今天是${day.label}，院所看診時段可能與平日登記不同，建議先電話確認。`));
   } else if (day.makeUpWorkday) {
@@ -69,11 +94,13 @@ export function renderBoard(root: HTMLElement, args: BoardArgs): void {
   root.append(footer(sourceDate));
 }
 
+/** Shared so the heading line and the footer table can never disagree. */
+const clock = (hour: number): string => `${String(hour).padStart(2, "0")}:00`;
+
 function slotTimeLabel(slotIndex: number): string {
   const pair = SLOT_HOURS[slotIndex];
   if (!pair) return "";
-  const [start, end] = pair;
-  return `本站定義：${String(start).padStart(2, "0")}:00 – ${String(end).padStart(2, "0")}:00`;
+  return `本站定義：${clock(pair[0])} – ${clock(pair[1])}`;
 }
 
 function heading(title: string, sub: string): HTMLElement {
@@ -168,6 +195,15 @@ function footer(sourceDate: string): HTMLElement {
   const freshness = document.createElement("p");
   freshness.textContent = `資料日期 ${sourceDate}，每日自健保署開放資料更新。`;
 
+  // The NHI publishes only 上午/下午/晚上 with no clock times, so this mapping is
+  // ours and has to be legible in every state — including a gap, where the
+  // heading names a session but shows no hours. Derived from SLOT_HOURS rather
+  // than retyped, or it would drift from slot.ts.
+  const sessions = document.createElement("p");
+  sessions.textContent = `本站時段定義：${SLOT_HOURS.map(
+    ([start, end], i) => `${SLOTS[i] ?? ""} ${clock(start)}–${clock(end)}`,
+  ).join("、")}`;
+
   const caveat = document.createElement("p");
   caveat.textContent =
     "看診時段由院所每月申報，臨時休診無法反映；「晚上」不保證營業到幾點。" +
@@ -178,6 +214,6 @@ function footer(sourceDate: string): HTMLElement {
     "資料來源：衛生福利部中央健康保險署「健保特約醫事機構」開放資料、" +
     "行政院人事行政總處「政府行政機關辦公日曆表」。依政府資料開放授權條款第 1 版利用。";
 
-  el.append(freshness, caveat, attribution);
+  el.append(freshness, sessions, caveat, attribution);
   return el;
 }

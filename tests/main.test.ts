@@ -177,3 +177,70 @@ describe("district selection", () => {
     expect(text()).toContain("資料載入失敗");
   });
 });
+
+describe("degraded loads", () => {
+  /** A fetch that fails everything, as an offline phone would. */
+  const offline = (): void => {
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError("Failed to fetch");
+    });
+  };
+
+  it("falls back to the cached shard behind a banner naming its date", async () => {
+    await boot();
+    shards.大安區.resolve([venue("大安診所")]);
+    await settle();
+    expect(text()).toContain("大安診所");
+
+    // Reload with everything unreachable — the returning-user-on-bad-signal case.
+    offline();
+    document.body.innerHTML = '<main id="app"></main>';
+    vi.resetModules();
+    await boot();
+
+    expect(text()).toContain("大安診所");
+    expect(text()).toContain("無法取得最新資料");
+    expect(text()).not.toContain("資料載入失敗");
+  });
+
+  it("keeps the error when the cache holds a different district than the one picked", async () => {
+    await boot();
+    shards.大安區.resolve([venue("大安診所")]);
+    await settle();
+
+    // 中正區 was never loaded, so the only cached shard is 大安區's. Serving it
+    // would put one district's clinics under a picker naming another.
+    await pick("中正區");
+    shards.中正區.reject(new Error("HTTP 503"));
+    await settle();
+
+    expect(text()).toContain("資料載入失敗");
+    expect(text()).not.toContain("大安診所");
+    expect(districtSelect().value).toBe("中正區");
+  });
+
+  it("warns that the holiday check did not run when the calendar is unreachable", async () => {
+    // index and shard succeed; only the calendar is unreachable.
+    vi.stubGlobal("fetch", async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith("index.json")) return { ok: true, status: 200, json: async () => INDEX };
+      if (url.endsWith("calendar.csv")) throw new TypeError("Failed to fetch");
+      return { ok: true, status: 200, json: async () => [venue("大安診所")] };
+    });
+    await boot();
+
+    expect(text()).toContain("大安診所");
+    expect(text()).toContain("無法取得辦公日曆");
+  });
+
+  it("stays silent when no calendar is published for the year", async () => {
+    // The default stub 404s calendar.csv, which is how build-data.ts represents
+    // "the DGPA has not published one yet" — legitimate, and warned at build time.
+    await boot();
+    shards.大安區.resolve([venue("大安診所")]);
+    await settle();
+
+    expect(text()).toContain("大安診所");
+    expect(text()).not.toContain("無法取得辦公日曆");
+  });
+});

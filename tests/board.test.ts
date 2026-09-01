@@ -171,6 +171,58 @@ describe("renderBoard", () => {
     expect(root.querySelector("img")).toBeNull();
     expect(root.textContent).toContain("<img src=x onerror=alert(1)>");
   });
+
+  it("prints all three sessions, not only the current one", () => {
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    const text = root.textContent ?? "";
+    for (const row of ["上午 08:00–12:00", "下午 14:00–18:00", "晚上 18:00–21:00"]) {
+      expect(text).toContain(row);
+    }
+  });
+
+  it("still prints the whole session table while sitting in a gap", () => {
+    renderBoard(root, { venues: [venue("a")], at: mondayLunch, day, sourceDate: "2026-09-01" });
+    const text = root.textContent ?? "";
+    // A gap heading names 下一個時段 but shows no hours, so the table is the only
+    // place the user can find out what 下午 actually means.
+    for (const row of ["上午 08:00–12:00", "下午 14:00–18:00", "晚上 18:00–21:00"]) {
+      expect(text).toContain(row);
+    }
+  });
+
+  it("says the data is from cache and when, rather than passing it off as live", () => {
+    renderBoard(root, {
+      venues: [venue("a")],
+      at: sundayEvening,
+      day,
+      sourceDate: "2026-09-01",
+      cachedAt: "2026-08-30 21:14",
+    });
+    expect(root.textContent).toContain("2026-08-30 21:14");
+    expect(root.textContent).toContain("無法取得最新資料");
+  });
+
+  it("makes no cache claim when the data is live", () => {
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    expect(root.textContent).not.toContain("無法取得最新資料");
+  });
+
+  it("says the holiday check could not run when the calendar is unreachable", () => {
+    renderBoard(root, {
+      venues: [venue("a")],
+      at: sundayEvening,
+      day,
+      sourceDate: "2026-09-01",
+      calendarUnavailable: true,
+    });
+    expect(root.textContent).toContain("無法取得辦公日曆");
+    expect(root.textContent).toContain("沒有檢查到");
+  });
+
+  it("stays silent about the calendar when it loaded and today is ordinary", () => {
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    expect(root.textContent).not.toContain("無法取得辦公日曆");
+  });
 });
 
 describe("picker persistence", () => {
