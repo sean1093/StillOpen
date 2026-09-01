@@ -1857,16 +1857,134 @@ jobs:
 
 - [ ] **Step 2: Trigger it manually and confirm it succeeds**
 
+Precondition: `data.yml` must already be on `main` — `workflow_dispatch` can only
+dispatch a workflow that exists on the target ref. In practice this step runs
+after the merge in Task 8 Step 2.
+
+A manual dispatch has no new commit to key on, so identify the run by **id**.
+Run ids increase monotonically, so recording the highest existing one first makes
+"the run I just started" unambiguous without depending on clock skew or on
+`--limit 1`, which is a snapshot and can return a stale or queued run. There is
+no fixed `sleep`: a guess at GitHub's queue latency either wastes time or reads
+too early.
+
 ```bash
-git add .github/workflows/data.yml
-git commit -m "ci: rebuild venue data daily from NHI open data"
-git push
-gh workflow run data
-sleep 30
-gh run list --workflow=data --limit 1
+set -euo pipefail
+REPO=sean1093/StillOpen
+
+git fetch -q origin main
+BEFORE=$(git rev-parse origin/main)
+BEFORE_MAX=$(gh run list --workflow=data --limit 50 --json databaseId \
+               --jq '[.[].databaseId] | max // 0')
+echo "main before: $BEFORE"
+echo "highest existing data run id: $BEFORE_MAX"
+
+gh workflow run data --ref main
+
+ID=""
+deadline=$(( $(date +%s) + 120 ))
+while [ -z "$ID" ]; do
+  ID=$(gh run list --workflow=data --limit 50 --json databaseId,event \
+         --jq "[.[] | select(.databaseId > $BEFORE_MAX and .event == \"workflow_dispatch\")]
+               | first | .databaseId // empty")
+  [ -n "$ID" ] && break
+  [ "$(date +%s)" -ge "$deadline" ] && { echo "FAIL: dispatched data run never appeared"; exit 1; }
+  sleep 5
+done
+echo "data run id: $ID"
+
+deadline=$(( $(date +%s) + 1800 ))
+while :; do
+  out=$(gh run view "$ID" --json status,conclusion --jq '"\(.status) \(.conclusion // "-")"')
+  st=${out%% *}; cc=${out##* }
+  echo "  $(date -u +%H:%M:%S)Z status=$st conclusion=$cc"
+  [ "$st" = "completed" ] && break
+  [ "$(date +%s)" -ge "$deadline" ] && { echo "FAIL: data run $ID still '$st' after 1800s"; exit 1; }
+  sleep 15
+done
+[ "$cc" = "success" ] || { echo "FAIL: data run $ID concluded '$cc'"; gh run view "$ID" --log-failed; exit 1; }
+echo "PASS: data run $ID succeeded"
 ```
 
-Expected: the most recent run reaches `completed / success`.
+Expected — `data run id` must exceed `highest existing data run id`:
+
+```
+main before: <40-hex>
+highest existing data run id: <digits or 0>
+data run id: <larger digits>
+  HH:MM:SSZ status=in_progress conclusion=-
+  HH:MM:SSZ status=completed conclusion=success
+PASS: data run <digits> succeeded
+```
+
+**A green run is not the whole claim.** The workflow commits only when `data/`
+actually changed, so success has two legitimate outcomes — and one illegitimate
+one that looks identical from the run list. Decide between them explicitly:
+
+```bash
+git fetch -q origin main
+AFTER=$(git rev-parse origin/main)
+
+# Capture the log, then match the string. Do NOT pipe it into `grep -q`: grep
+# exits on the first match and closes the pipe, `gh` dies with SIGPIPE, and
+# under `set -o pipefail` the pipeline reports 141 even though the text WAS
+# found — which would silently invert this test on its most common outcome.
+LOG=$(gh run view "$ID" --log)
+if [[ $LOG == *"no data change"* ]]; then CLAIMED=nothing; else CLAIMED=committed; fi
+echo "claimed: $CLAIMED"
+echo "main after: $AFTER"
+
+if [ "$CLAIMED" = nothing ]; then
+  [ "$AFTER" = "$BEFORE" ] \
+    || { echo "FAIL: run claimed no change but main moved $BEFORE -> $AFTER"; exit 1; }
+  echo "PASS: ran and correctly found nothing to commit"
+else
+  [ "$AFTER" != "$BEFORE" ] \
+    || { echo "FAIL: run rebuilt data but main did not move — the commit or push was lost"; exit 1; }
+  git log --format='%h %an %s' "$BEFORE..$AFTER"
+  outside=$(git diff --name-only "$BEFORE" "$AFTER" | sed '/^data\//d')
+  [ -z "$outside" ] \
+    || { echo "FAIL: the bot commit touched files outside data/:"; printf '%s\n' "$outside"; exit 1; }
+  echo "PASS: ran and committed a real data refresh"
+fi
+```
+
+**Telling the two apart.** `no data change` is printed only when the workflow's
+own `git add data && git diff --cached --quiet` found the freshly rebuilt tree
+byte-identical to the committed one. That is git's comparison, not a heuristic,
+so it is positive evidence that there was nothing to commit — not evidence that
+the commit was skipped. The failure this distinguishes is the `else` branch:
+the run rebuilt data and did **not** print `no data change`, yet `main` did not
+move. That means the commit or the push was lost — a rejected non-fast-forward,
+or credentials not persisted — and it would otherwise show as a perfectly green
+run that silently shipped nothing.
+
+Expected, one of exactly these two:
+
+```
+claimed: nothing
+main after: <same 40-hex as before>
+PASS: ran and correctly found nothing to commit
+```
+
+```
+claimed: committed
+main after: <new 40-hex>
+<short> github-actions[bot] chore(data): refresh from NHI open data
+PASS: ran and committed a real data refresh
+```
+
+Finally, confirm the chain into deployment. A `pages` run with
+`"event": "workflow_run"` must appear — that is the GITHUB_TOKEN-suppression
+workaround doing its job, and its absence means the site will never refresh:
+
+```bash
+gh run list --workflow=pages --limit 5 --json databaseId,event,status,conclusion
+```
+
+Then re-run the byte-identity block in **Task 8 Step 3** with `SHA` unset, so it
+resolves `origin/main` afresh and proves the refresh actually reached the
+deployed site rather than merely passing CI.
 
 - [ ] **Step 3: Confirm the gate actually blocks a bad build**
 
@@ -2557,7 +2675,7 @@ echo "deploying commit $SHA"
 # otherwise a pre-existing successful run makes broken setup look fine.
 if err=$(gh api -X POST "repos/$REPO/pages" -f build_type=workflow 2>&1 >/dev/null); then
   echo "pages: created"
-elif printf '%s' "$err" | grep -q 'HTTP 409'; then
+elif [[ $err == *"HTTP 409"* ]]; then
   echo "pages: already enabled, continuing"
 else
   echo "FAIL: could not enable Pages"; printf '%s\n' "$err"; exit 1
