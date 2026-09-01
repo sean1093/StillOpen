@@ -103,6 +103,17 @@ describe("classifyDay", () => {
       label: "",
     });
   });
+
+  it("only treats 六 and 日 as the weekend, whatever the 星期 column says", () => {
+    // A garbage 星期 value must read as an ordinary working day, not as 補班.
+    for (const weekday of ["__proto__", "constructor", "toString", "Sat", ""]) {
+      expect(classifyDay({ date: "20260301", weekday, isDayOff: false, note: "" })).toEqual({
+        holiday: false,
+        makeUpWorkday: false,
+        label: "",
+      });
+    }
+  });
 });
 
 describe("toKey", () => {

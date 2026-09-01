@@ -19,7 +19,7 @@ export interface DayClass {
 }
 
 /** 星期 column values that fall on the weekend. */
-const WEEKEND: Readonly<Record<string, true>> = { "六": true, "日": true };
+const WEEKEND = new Set(["六", "日"]);
 
 export function toKey(d: Date): string {
   const y = d.getFullYear();
@@ -67,7 +67,7 @@ export function parseCalendarCsv(csv: string): Map<string, DayInfo> {
 export function classifyDay(info: DayInfo | undefined): DayClass {
   if (!info) return { holiday: false, makeUpWorkday: false, label: "" };
 
-  if (!info.isDayOff && WEEKEND[info.weekday]) {
+  if (!info.isDayOff && WEEKEND.has(info.weekday)) {
     return { holiday: false, makeUpWorkday: true, label: info.note };
   }
   if (info.isDayOff && info.note) {
