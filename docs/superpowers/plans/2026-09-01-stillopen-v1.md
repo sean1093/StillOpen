@@ -1888,10 +1888,16 @@ BEFORE=$(git rev-parse origin/main)
 # stronger property: EVERY match must be in the window, or a second match could
 # hide off the page and N=1 would be wrong. Each guard therefore checks that the
 # window still reaches back past its baseline, and refuses if it does not.
+#
+# `|| echo 0` because a workflow absent from the default branch is UNKNOWN to
+# GitHub, so `gh run list --workflow` exits non-zero with "could not find any
+# workflows named …" rather than returning `[]`. Under `set -e` that aborts the
+# whole block before the zero-baseline path can be reached. Verified the first
+# time this ran against a repo with no history.
 BEFORE_MAX=$(gh run list --workflow=data --limit 100 --json databaseId \
-               --jq '[.[].databaseId] | max // 0')
+               --jq '[.[].databaseId] | max // 0' 2>/dev/null || echo 0)
 PAGES_MAX=$(gh run list --workflow=pages --limit 100 --json databaseId \
-              --jq '[.[].databaseId] | max // 0')
+              --jq '[.[].databaseId] | max // 0' 2>/dev/null || echo 0)
 echo "main before: $BEFORE"
 echo "highest existing data run id: $BEFORE_MAX"
 echo "highest existing pages run id: $PAGES_MAX"
@@ -1963,8 +1969,20 @@ AFTER=$(git rev-parse origin/main)
 # exits on the first match and closes the pipe, `gh` dies with SIGPIPE, and
 # under `set -o pipefail` the pipeline reports 141 even though the text WAS
 # found — which would silently invert this test on its most common outcome.
+#
+# Match git's OUTPUT, not the string `no data change`. `gh run view --log`
+# includes the `##[group]Run …` echo of the step's own SOURCE, so the literal
+# `echo "no data change"` appears in the log whether or not that branch ran.
+# Matching it reported `nothing` on a run that had just committed 7 files. The
+# bracket form `] chore(data)` cannot appear in the source echo — there the line
+# reads `git commit -m "chore(data): …"` — so it only matches git's real output
+# `[main c15c51f] chore(data): refresh from NHI open data`.
 LOG=$(gh run view "$ID" --log)
-if [[ $LOG == *"no data change"* ]]; then CLAIMED=nothing; else CLAIMED=committed; fi
+if [[ $LOG == *'] chore(data): refresh from NHI open data'* ]]; then
+  CLAIMED=committed
+else
+  CLAIMED=nothing
+fi
 echo "claimed: $CLAIMED"
 echo "main after: $AFTER"
 
@@ -1986,7 +2004,12 @@ else
   git log -1 --format='%h %an %s' "$BOT_SHA"
   [ "$(git log -1 --format='%an' "$BOT_SHA")" = "github-actions[bot]" ] \
     || { echo "FAIL: $BOT_SHA was not authored by github-actions[bot]"; exit 1; }
-  outside=$(git show --name-only --format= "$BOT_SHA" | sed '/^data\//d;/^$/d')
+  # `-c core.quotePath=false` because every shard filename is CJK and git quotes
+  # non-ASCII paths by default, emitting `"data/\346\241\203…"`. Those start with
+  # a quote, not `data/`, so the sed kept every one of them and the check failed
+  # on a commit that was entirely inside data/.
+  outside=$(git -c core.quotePath=false show --name-only --format= "$BOT_SHA" \
+              | sed '/^data\//d;/^$/d')
   [ -z "$outside" ] \
     || { echo "FAIL: the bot commit touched files outside data/:"; printf '%s\n' "$outside"; exit 1; }
   echo "PASS: ran and committed a real data refresh ($BOT_SHA)"
@@ -2752,8 +2775,10 @@ REPO=sean1093/StillOpen
 # triggered by this push before Pages was enabled, or an earlier deploy of the
 # same commit — and selecting it would report PASS without ever validating this
 # attempt.
+# `|| echo 0`: a workflow absent from the default branch is unknown to GitHub,
+# so this exits non-zero rather than returning `[]`, aborting under `set -e`.
 PAGES_MAX=$(gh run list --workflow=pages --limit 100 --json databaseId \
-              --jq '[.[].databaseId] | max // 0')
+              --jq '[.[].databaseId] | max // 0' 2>/dev/null || echo 0)
 echo "highest existing pages run id: $PAGES_MAX"
 
 # The workflow is already committed. Publishing it to main is what triggers the
