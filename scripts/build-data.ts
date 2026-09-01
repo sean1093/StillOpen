@@ -1,7 +1,13 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parseHours } from "../src/lib/hours";
-import { parseLocation } from "../src/lib/location";
+import {
+  type CityCandidates,
+  type DistrictCensus,
+  parseCityCandidates,
+  recordDistrictReading,
+  resolveDistrict,
+} from "../src/lib/location";
 import type { DataIndex, DistrictEntry, Venue, VenueKind } from "../src/lib/types";
 import {
   DATASETS,
@@ -86,6 +92,12 @@ export function buildFromRecords(input: BuildInput): BuildResult {
   const stats = {} as Record<VenueKind, BuildStats>;
   const bitmapById = new Map<string, string>();
 
+  // A district name cannot be read off one address (see `resolveDistrict`), so
+  // the first pass only votes on the readings it sees and the second pass files
+  // the venues once every vote is in.
+  const census: DistrictCensus = new Map();
+  const placed: { venue: Venue; where: CityCandidates }[] = [];
+
   for (const [kind, rows] of [
     ["clinic", input.clinics],
     ["pharmacy", input.pharmacies],
@@ -113,7 +125,7 @@ export function buildFromRecords(input: BuildInput): BuildResult {
         continue;
       }
 
-      const where = parseLocation(row.ADDRESS ?? "", row.GOVAREANO ?? "");
+      const where = parseCityCandidates(row.ADDRESS ?? "", row.GOVAREANO ?? "");
       if (!where) {
         stat.locationFailed++;
         continue;
@@ -134,17 +146,23 @@ export function buildFromRecords(input: BuildInput): BuildResult {
         note: clean(row.HOLIDAY_REMARK_CNAME),
       };
 
-      const path = `${where.city}/${where.district}.json`;
-      const bucket = shards.get(path);
-      if (bucket) bucket.push(venue);
-      else shards.set(path, [venue]);
-
+      recordDistrictReading(census, where);
+      placed.push({ venue, where });
       bitmapById.set(venue.id, open);
       stat.kept++;
     }
 
     stats[kind] = stat;
     assertGates(kind, stat, gates);
+  }
+
+  // Second pass: every reading is now attested, so each venue can be filed
+  // under the district its own city voted for.
+  for (const { venue, where } of placed) {
+    const path = `${where.city}/${resolveDistrict(census, where)}.json`;
+    const bucket = shards.get(path);
+    if (bucket) bucket.push(venue);
+    else shards.set(path, [venue]);
   }
 
   // Index keys and shard contents are both walked in sorted order, so the
