@@ -15,6 +15,49 @@ export const DATASETS = {
 
 const PAGE = 1000;
 
+const ATTEMPTS = 4;
+const TIMEOUT_MS = 60_000;
+
+/**
+ * `fetch` with a per-attempt timeout and retries on network errors, timeouts and
+ * 5xx/429. A full rebuild fires dozens of concurrent requests at two government
+ * hosts, and a single dropped connection used to abort the whole daily run with
+ * a bare "fetch failed". 4xx other than 429 are returned as-is: retrying a bad
+ * request cannot help, and callers already turn !ok into a descriptive error.
+ */
+export async function fetchWithRetry(
+  url: string,
+  { attempts = ATTEMPTS, baseDelayMs = 2000 }: { attempts?: number; baseDelayMs?: number } = {},
+): Promise<Response> {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** (i - 1)));
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+      if (res.status < 500 && res.status !== 429) {
+        // Buffer the body inside the loop: a connection that drops mid-download
+        // surfaces from the body read, not from fetch(), and must be retried too.
+        const body = [204, 205, 304].includes(res.status) ? null : await res.arrayBuffer();
+        return new Response(body, { status: res.status, headers: res.headers });
+      }
+      lastError = new Error(`HTTP ${res.status}`);
+      await res.body?.cancel();
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw new Error(`${url} -> ${describe(lastError)} (after ${attempts} attempts)`, {
+    cause: lastError,
+  });
+}
+
+/** undici reports every network failure as "fetch failed"; the real reason is in `cause`. */
+function describe(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const cause = err.cause instanceof Error ? `: ${err.cause.message}` : "";
+  return `${err.message}${cause}`;
+}
+
 interface DatastoreResponse {
   success: boolean;
   result: { total: number; records: NhiRecord[] };
@@ -45,7 +88,7 @@ export async function fetchAll(resourceId: string): Promise<NhiRecord[]> {
 
 async function getPage(resourceId: string, offset: number): Promise<DatastoreResponse> {
   const url = `${BASE}/datastore/${resourceId}?limit=${PAGE}&offset=${offset}`;
-  const res = await fetch(url);
+  const res = await fetchWithRetry(url);
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
   const body = (await res.json()) as DatastoreResponse;
   if (!body.success) throw new Error(`${url} -> success=false`);
@@ -55,7 +98,7 @@ async function getPage(resourceId: string, offset: number): Promise<DatastoreRes
 /** The dataset's own `modified` timestamp, as YYYY-MM-DD. */
 export async function fetchDatasetModified(identifier: string): Promise<string> {
   const url = `${BASE}/dataset/${identifier}`;
-  const res = await fetch(url);
+  const res = await fetchWithRetry(url);
   if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
   const body = (await res.json()) as { modified?: string };
   const modified = body.modified;
@@ -70,7 +113,7 @@ export async function fetchDatasetModified(identifier: string): Promise<string> 
  */
 export async function fetchOfficeCalendar(year: number): Promise<string | null> {
   const rocYear = year - 1911;
-  const page = await (await fetch("https://data.gov.tw/dataset/14718")).text();
+  const page = await fetchText("https://data.gov.tw/dataset/14718");
   const links = [
     ...new Set(
       [...page.matchAll(/https?:\/\/[^"'\s<>\\]+?\.csv[^"'\s<>\\]*/gi)].map((m) =>
@@ -92,9 +135,15 @@ export async function fetchOfficeCalendar(year: number): Promise<string | null> 
   candidates.sort((a, b) => a.url.localeCompare(b.url));
   const chosen = candidates[candidates.length - 1]!;
 
-  const res = await fetch(chosen.url);
+  const res = await fetchWithRetry(chosen.url);
   if (!res.ok) throw new Error(`${chosen.url} -> HTTP ${res.status}`);
   return new TextDecoder("utf-8").decode(new Uint8Array(await res.arrayBuffer()));
+}
+
+async function fetchText(url: string): Promise<string> {
+  const res = await fetchWithRetry(url);
+  if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+  return res.text();
 }
 
 function safeDecode(url: string): string {
