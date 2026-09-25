@@ -22,6 +22,25 @@ describe("fetchWithRetry", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("retries a connection that drops while the body is downloading", async () => {
+    const broken = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.error(networkError());
+        },
+      }),
+    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(broken)
+      .mockResolvedValueOnce(new Response('{"ok":true}'));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await fetchWithRetry("https://example.test/body", { baseDelayMs: 0 });
+    expect(await res.json()).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("retries 5xx but returns other 4xx without retrying", async () => {
     const fetchMock = vi
       .fn()

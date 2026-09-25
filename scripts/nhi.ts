@@ -34,7 +34,12 @@ export async function fetchWithRetry(
     if (i > 0) await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** (i - 1)));
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
-      if (res.status < 500 && res.status !== 429) return res;
+      if (res.status < 500 && res.status !== 429) {
+        // Buffer the body inside the loop: a connection that drops mid-download
+        // surfaces from the body read, not from fetch(), and must be retried too.
+        const body = [204, 205, 304].includes(res.status) ? null : await res.arrayBuffer();
+        return new Response(body, { status: res.status, headers: res.headers });
+      }
       lastError = new Error(`HTTP ${res.status}`);
       await res.body?.cancel();
     } catch (err) {
