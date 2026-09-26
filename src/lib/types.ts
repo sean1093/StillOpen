@@ -21,6 +21,13 @@ export interface Venue {
   open: HoursBitmap;
   /** HOLIDAY_REMARK_CNAME, empty string when the source holds "-" or blank. */
   note: string;
+  /**
+   * CLOSESHOP (終止合約或歇業日期) as YYYYMMDD, present only when a termination
+   * is on record. The build drops venues whose date has already arrived; this
+   * carries the future ones so the client can drop them on the day, even when
+   * the data has not been rebuilt since.
+   */
+  end?: string;
 }
 
 export interface DistrictEntry {

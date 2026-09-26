@@ -1,6 +1,7 @@
 import { SLOTS, isOpen } from "../lib/hours";
 import { SLOT_HOURS, describeSlot, type SlotPosition, type SlotResolution } from "../lib/slot";
-import type { DayClass } from "../lib/calendar";
+import { toKey, type DayClass } from "../lib/calendar";
+import { ALERT_AFTER_DAYS, STALE_AFTER_HOURS, dataAgeHours } from "../lib/freshness";
 import type { Venue } from "../lib/types";
 
 /**
@@ -10,6 +11,15 @@ import type { Venue } from "../lib/types";
  * or the list and the heading would name different sessions.
  */
 const positionOf = (at: SlotResolution): SlotPosition => (at.kind === "in" ? at.at : at.next);
+
+/**
+ * Drop venues whose contract ends on or before `today` (YYYYMMDD). The build
+ * already dropped the ones ended at build time; this catches the rest when the
+ * data is older than a day, using the same "on or before" rule as the build.
+ */
+export function dropEnded(venues: Venue[], today: string): Venue[] {
+  return venues.filter((v) => !v.end || v.end > today);
+}
 
 /** Venues open in the cell the user actually cares about right now. */
 export function selectOpen(venues: Venue[], at: SlotResolution): Venue[] {
@@ -22,6 +32,10 @@ export interface BoardArgs {
   at: SlotResolution;
   day: DayClass;
   sourceDate: string;
+  /** DataIndex.generatedAt — when the data was last rebuilt, for the staleness check. */
+  generatedAt: string;
+  /** The user's current instant: decides contract expiry and data age. */
+  now: Date;
   /**
    * Set when the office calendar could not be fetched, so no holiday check ran.
    * Distinct from "no calendar published for this year", which is legitimate and
@@ -39,9 +53,14 @@ export interface BoardArgs {
  * why, and it never implies a guarantee the data cannot support.
  */
 export function renderBoard(root: HTMLElement, args: BoardArgs): void {
-  const { venues, at, day, sourceDate } = args;
+  const { at, day, sourceDate } = args;
+  const venues = dropEnded(args.venues, toKey(args.now));
   const position = positionOf(at);
   const open = selectOpen(venues, at);
+  // NaN (unparsable timestamp) compares false everywhere, i.e. reads as fresh:
+  // a bad field must not put a false alarm above every board.
+  const ageHours = dataAgeHours(args.generatedAt, args.now);
+  const ageDays = Math.floor(ageHours / 24);
 
   root.replaceChildren();
 
@@ -64,6 +83,14 @@ export function renderBoard(root: HTMLElement, args: BoardArgs): void {
       notice(
         `目前無法取得最新資料，以下是 ${args.cachedAt} 存下的內容，院所時段可能已經改變。` +
           "出門前務必先打電話確認。",
+      ),
+    );
+  }
+
+  if (ageHours >= ALERT_AFTER_DAYS * 24) {
+    root.append(
+      notice(
+        `資料已 ${ageDays} 天未更新，部分院所的看診時段或合約可能已經改變。出門前務必先打電話確認。`,
       ),
     );
   }
@@ -91,7 +118,7 @@ export function renderBoard(root: HTMLElement, args: BoardArgs): void {
     root.append(list);
   }
 
-  root.append(footer(sourceDate));
+  root.append(footer(sourceDate, ageHours > STALE_AFTER_HOURS ? ageDays : null));
 }
 
 /** Shared so the heading line and the footer table can never disagree. */
@@ -188,12 +215,17 @@ function paragraph(text: string): HTMLElement {
   return el;
 }
 
-function footer(sourceDate: string): HTMLElement {
+/** `staleDays` is null while the daily refresh is keeping up. */
+function footer(sourceDate: string, staleDays: number | null): HTMLElement {
   const el = document.createElement("footer");
   el.className = "mt-8 space-y-2 border-t border-hair pt-4 text-xs leading-relaxed text-muted";
 
   const freshness = document.createElement("p");
-  freshness.textContent = `資料日期 ${sourceDate}，每日自健保署開放資料更新。`;
+  // Never claim a daily refresh that is not happening.
+  freshness.textContent =
+    staleDays === null
+      ? `資料日期 ${sourceDate}，每日自健保署開放資料更新。`
+      : `資料日期 ${sourceDate}。自動更新暫停中，最近一次更新是 ${staleDays} 天前。`;
 
   // The NHI publishes only 上午/下午/晚上 with no clock times, so this mapping is
   // ours and has to be legible in every state — including a gap, where the

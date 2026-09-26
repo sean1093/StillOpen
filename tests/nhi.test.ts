@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { fetchWithRetry } from "../scripts/nhi";
+import { UpstreamUnavailable, fetchWithRetry } from "../scripts/nhi";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -61,5 +61,12 @@ describe("fetchWithRetry", () => {
       fetchWithRetry("https://example.test/c", { attempts: 3, baseDelayMs: 0 }),
     ).rejects.toThrow("https://example.test/c -> fetch failed: ECONNRESET (after 3 attempts)");
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("marks exhaustion as UpstreamUnavailable so the workflow can keep old data", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 503 })));
+    await expect(
+      fetchWithRetry("https://example.test/d", { attempts: 2, baseDelayMs: 0 }),
+    ).rejects.toBeInstanceOf(UpstreamUnavailable);
   });
 });

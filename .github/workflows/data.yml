@@ -54,8 +54,28 @@ jobs:
 
       # A gate failure exits non-zero here, so the commit step never runs and
       # yesterday's data keeps serving.
+      #
+      # Exit 75 is the one exception: the NHI host was unreachable even after
+      # retries (since 2026-09-25 it resets every connection from GitHub's US
+      # runners). No data was touched, so keeping the committed data/ is the
+      # designed outcome and the run stays green with a warning, until
+      # check:fresh finds data/ past ALERT_AFTER_DAYS and fails it. Every other
+      # exit code, gates included, still fails here.
       - name: Rebuild data
-        run: npm run build:data
+        id: build
+        run: |
+          set +e
+          npm run build:data
+          code=$?
+          if [ "$code" -eq 75 ]; then
+            echo "unreachable=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+
+      - name: Fail if data has gone stale
+        if: steps.build.outputs.unreachable == 'true'
+        run: npm run check:fresh
 
       - name: Commit if changed
         run: |
