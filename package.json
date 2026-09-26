@@ -20,7 +20,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build:data": "tsx scripts/build-data.ts"
+    "build:data": "tsx scripts/build-data.ts",
+    "check:fresh": "tsx scripts/check-fresh.ts"
   },
   "devDependencies": {
     "@types/node": "^26.4.0",

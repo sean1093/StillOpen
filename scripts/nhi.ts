@@ -19,6 +19,16 @@ const ATTEMPTS = 4;
 const TIMEOUT_MS = 60_000;
 
 /**
+ * The upstream host could not be reached even after retrying (network errors,
+ * timeouts, 5xx, 429). Distinct from a bad response, so the data workflow can
+ * treat "NHI is down or blocking us" as a keep-yesterday's-data outcome while
+ * still failing hard on anything that means our code or their format is wrong.
+ */
+export class UpstreamUnavailable extends Error {
+  override name = "UpstreamUnavailable";
+}
+
+/**
  * `fetch` with a per-attempt timeout and retries on network errors, timeouts and
  * 5xx/429. A full rebuild fires dozens of concurrent requests at two government
  * hosts, and a single dropped connection used to abort the whole daily run with
@@ -46,7 +56,7 @@ export async function fetchWithRetry(
       lastError = err;
     }
   }
-  throw new Error(`${url} -> ${describe(lastError)} (after ${attempts} attempts)`, {
+  throw new UpstreamUnavailable(`${url} -> ${describe(lastError)} (after ${attempts} attempts)`, {
     cause: lastError,
   });
 }

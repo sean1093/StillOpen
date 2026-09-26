@@ -158,6 +158,8 @@ async function start(): Promise<void> {
         at: resolveSlot(new Date()),
         day,
         sourceDate: index.sourceDate,
+        generatedAt: index.generatedAt,
+        now: new Date(),
         calendarUnavailable: calendar.failed,
         cachedAt,
       });

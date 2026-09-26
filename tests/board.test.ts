@@ -65,19 +65,26 @@ describe("renderBoard", () => {
   });
 
   const day = { holiday: false, makeUpWorkday: false, label: "" };
+  // Built this morning; `now` is midday on the same date in any plausible TZ.
+  const now = new Date("2026-09-06T11:00:00Z");
+  const fresh = { generatedAt: "2026-09-06T00:00:00Z", now };
+  const builtDaysAgo = (days: number) => ({
+    generatedAt: new Date(now.getTime() - days * 86_400_000).toISOString(),
+    now,
+  });
 
   it("always states the data date", () => {
-    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01", ...fresh });
     expect(root.textContent).toContain("2026-09-01");
   });
 
   it("always states the phone-first disclaimer", () => {
-    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01", ...fresh });
     expect(root.textContent).toContain("出門前請先打電話");
   });
 
   it("prints the session time table so 晚上 is never ambiguous", () => {
-    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01", ...fresh });
     expect(root.textContent).toContain("18:00");
     expect(root.textContent).toContain("21:00");
   });
@@ -87,13 +94,13 @@ describe("renderBoard", () => {
       venues: [venue("a", { note: "幼兒疫苗僅於星期三、四早上提供。" })],
       at: sundayEvening,
       day,
-      sourceDate: "2026-09-01",
+      sourceDate: "2026-09-01", ...fresh,
     });
     expect(root.textContent).toContain("幼兒疫苗僅於星期三、四早上提供。");
   });
 
   it("offers a tel: link", () => {
-    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01", ...fresh });
     const link = root.querySelector<HTMLAnchorElement>('a[href^="tel:"]');
     expect(link?.getAttribute("href")).toBe("tel:0212345678");
   });
@@ -103,7 +110,7 @@ describe("renderBoard", () => {
       venues: [venue("a", { tel: "(049)2691404" })],
       at: sundayEvening,
       day,
-      sourceDate: "2026-09-01",
+      sourceDate: "2026-09-01", ...fresh,
     });
     const link = root.querySelector<HTMLAnchorElement>('a[href^="tel:"]');
     expect(link?.getAttribute("href")).toBe("tel:0492691404");
@@ -114,7 +121,7 @@ describe("renderBoard", () => {
       venues: [venue("a", { tel: "(07)6250942#23" })],
       at: sundayEvening,
       day,
-      sourceDate: "2026-09-01",
+      sourceDate: "2026-09-01", ...fresh,
     });
     expect(root.textContent).toContain("(07)6250942#23");
     expect(root.querySelector('a[href^="tel:"]')).toBeNull();
@@ -125,7 +132,7 @@ describe("renderBoard", () => {
       venues: [venue("a")],
       at: sundayEvening,
       day: { holiday: true, makeUpWorkday: false, label: "中秋節" },
-      sourceDate: "2026-09-01",
+      sourceDate: "2026-09-01", ...fresh,
     });
     expect(root.textContent).toContain("中秋節");
     expect(root.textContent).toContain("可能與平日登記不同");
@@ -136,7 +143,7 @@ describe("renderBoard", () => {
       venues: [venue("a")],
       at: sundayEvening,
       day: { holiday: false, makeUpWorkday: true, label: "補行上班" },
-      sourceDate: "2026-09-01",
+      sourceDate: "2026-09-01", ...fresh,
     });
     expect(root.textContent).toContain("補班");
   });
@@ -146,14 +153,14 @@ describe("renderBoard", () => {
       venues: [venue("mon-afternoon", { open: parseHours(hours({ 下午: ["星期一"] }))! })],
       at: mondayLunch,
       day,
-      sourceDate: "2026-09-01",
+      sourceDate: "2026-09-01", ...fresh,
     });
     expect(root.textContent).toContain("午休");
     expect(root.textContent).toContain("星期一下午");
   });
 
   it("says plainly when nothing is open", () => {
-    renderBoard(root, { venues: [], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    renderBoard(root, { venues: [], at: sundayEvening, day, sourceDate: "2026-09-01", ...fresh });
     expect(root.textContent).toContain("沒有登記看診");
     // The h1 is read first on a phone, so it must not claim 還開著 over an empty
     // list. It still names the session, and the time table still disambiguates 晚上.
@@ -166,14 +173,14 @@ describe("renderBoard", () => {
       venues: [venue("x", { name: "<img src=x onerror=alert(1)>" })],
       at: sundayEvening,
       day,
-      sourceDate: "2026-09-01",
+      sourceDate: "2026-09-01", ...fresh,
     });
     expect(root.querySelector("img")).toBeNull();
     expect(root.textContent).toContain("<img src=x onerror=alert(1)>");
   });
 
   it("prints all three sessions, not only the current one", () => {
-    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01", ...fresh });
     const text = root.textContent ?? "";
     for (const row of ["上午 08:00–12:00", "下午 14:00–18:00", "晚上 18:00–21:00"]) {
       expect(text).toContain(row);
@@ -181,7 +188,7 @@ describe("renderBoard", () => {
   });
 
   it("still prints the whole session table while sitting in a gap", () => {
-    renderBoard(root, { venues: [venue("a")], at: mondayLunch, day, sourceDate: "2026-09-01" });
+    renderBoard(root, { venues: [venue("a")], at: mondayLunch, day, sourceDate: "2026-09-01", ...fresh });
     const text = root.textContent ?? "";
     // A gap heading names 下一個時段 but shows no hours, so the table is the only
     // place the user can find out what 下午 actually means.
@@ -195,7 +202,7 @@ describe("renderBoard", () => {
       venues: [venue("a")],
       at: sundayEvening,
       day,
-      sourceDate: "2026-09-01",
+      sourceDate: "2026-09-01", ...fresh,
       cachedAt: "2026-08-30 21:14",
     });
     expect(root.textContent).toContain("2026-08-30 21:14");
@@ -203,7 +210,7 @@ describe("renderBoard", () => {
   });
 
   it("makes no cache claim when the data is live", () => {
-    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01", ...fresh });
     expect(root.textContent).not.toContain("無法取得最新資料");
   });
 
@@ -212,15 +219,78 @@ describe("renderBoard", () => {
       venues: [venue("a")],
       at: sundayEvening,
       day,
-      sourceDate: "2026-09-01",
+      sourceDate: "2026-09-01", ...fresh,
       calendarUnavailable: true,
     });
     expect(root.textContent).toContain("無法取得辦公日曆");
     expect(root.textContent).toContain("沒有檢查到");
   });
 
+  it("hides a venue on the day its contract ends, even from data built earlier", () => {
+    renderBoard(root, {
+      venues: [
+        venue("ends-today", { end: "20260906" }),
+        venue("ends-tomorrow", { end: "20260907" }),
+        venue("ended-yesterday", { end: "20260905" }),
+        venue("no-end"),
+      ],
+      at: sundayEvening,
+      day,
+      sourceDate: "2026-09-01",
+      ...builtDaysAgo(5),
+    });
+    const text = root.textContent ?? "";
+    expect(text).not.toContain("ends-today");
+    expect(text).not.toContain("ended-yesterday");
+    expect(text).toContain("ends-tomorrow");
+    expect(text).toContain("no-end");
+  });
+
+  it("claims a daily refresh only while the data is actually fresh", () => {
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01", ...fresh });
+    expect(root.textContent).toContain("每日自健保署開放資料更新");
+    expect(root.textContent).not.toContain("自動更新暫停中");
+  });
+
+  it("says the refresh has stalled once a daily run has been missed", () => {
+    renderBoard(root, {
+      venues: [venue("a")],
+      at: sundayEvening,
+      day,
+      sourceDate: "2026-09-01",
+      ...builtDaysAgo(2),
+    });
+    expect(root.textContent).toContain("自動更新暫停中，最近一次更新是 2 天前");
+    expect(root.textContent).not.toContain("每日自健保署開放資料更新");
+    expect(root.textContent).not.toContain("天未更新");
+  });
+
+  it("warns above the list once the data is a week old", () => {
+    renderBoard(root, {
+      venues: [venue("a")],
+      at: sundayEvening,
+      day,
+      sourceDate: "2026-09-01",
+      ...builtDaysAgo(7),
+    });
+    expect(root.textContent).toContain("資料已 7 天未更新");
+  });
+
+  it("treats an unparsable build time as fresh rather than raising a false alarm", () => {
+    renderBoard(root, {
+      venues: [venue("a")],
+      at: sundayEvening,
+      day,
+      sourceDate: "2026-09-01",
+      generatedAt: "garbage",
+      now,
+    });
+    expect(root.textContent).toContain("每日自健保署開放資料更新");
+    expect(root.textContent).not.toContain("天未更新");
+  });
+
   it("stays silent about the calendar when it loaded and today is ordinary", () => {
-    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01" });
+    renderBoard(root, { venues: [venue("a")], at: sundayEvening, day, sourceDate: "2026-09-01", ...fresh });
     expect(root.textContent).not.toContain("無法取得辦公日曆");
   });
 });

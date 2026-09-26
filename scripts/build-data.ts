@@ -9,6 +9,7 @@ import {
   fetchAll,
   fetchDatasetModified,
   fetchOfficeCalendar,
+  UpstreamUnavailable,
   type NhiRecord,
 } from "./nhi";
 
@@ -170,6 +171,7 @@ export function buildFromRecords(input: BuildInput): BuildResult {
         open,
         note: clean(row.HOLIDAY_REMARK_CNAME),
       };
+      if (contractEnd) venue.end = contractEnd;
 
       const path = `${where.city}/${where.district}.json`;
       const bucket = shards.get(path);
@@ -363,6 +365,8 @@ async function main(): Promise<void> {
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((err) => {
     console.error(err instanceof Error ? err.message : err);
-    process.exit(1);
+    // 75 = EX_TEMPFAIL. The workflow keys on it to keep the committed data
+    // instead of going red; every other failure (gates included) stays 1.
+    process.exit(err instanceof UpstreamUnavailable ? 75 : 1);
   });
 }

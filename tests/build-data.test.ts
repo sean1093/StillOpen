@@ -87,6 +87,7 @@ describe("buildFromRecords — mapping", () => {
       spec: ["家醫科"],
       open: "N".repeat(21),
       note: "成人疫苗僅於星期一、二、五提供。",
+      end: "20281123",
     });
   });
 
@@ -147,6 +148,11 @@ describe("buildFromRecords — filtering", () => {
     expect(ids.has("ends-today")).toBe(false);
     expect(ids.has("ends-tomorrow")).toBe(true);
     expect(ids.has("no-end-date")).toBe(true);
+    // A future end date ships so the client can drop the venue on the day;
+    // a blank one ships nothing rather than an empty string.
+    const byId = new Map(r.shards.get(TAIPEI_DAAN)!.map((v) => [v.id, v]));
+    expect(byId.get("ends-tomorrow")!.end).toBe("20260902");
+    expect("end" in byId.get("no-end-date")!).toBe(false);
     expect(r.stats.clinic.live).toBe(5);
   });
 
