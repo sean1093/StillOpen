@@ -1,10 +1,13 @@
 name: data
 
 on:
-  schedule:
-    # 07:30 Asia/Taipei. GitHub cron is UTC and Taipei is a fixed UTC+8 with no
-    # DST, so 07:30 local is 23:30 UTC on the *previous* UTC day.
-    - cron: "30 23 * * *"
+  # The daily schedule is switched off; run this by hand from the Actions tab.
+  # To turn it back on, restore:
+  #
+  #   schedule:
+  #     # 07:30 Asia/Taipei. GitHub cron is UTC and Taipei is a fixed UTC+8 with
+  #     # no DST, so 07:30 local is 23:30 UTC on the *previous* UTC day.
+  #     - cron: "30 23 * * *"
   workflow_dispatch:
 
 permissions:
